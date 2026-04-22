@@ -15,6 +15,10 @@ docs/
 .aider.*
 .DS_Store
 
+# Local scripts
+setup-dev-unraid.sh
+CLAUDE.md
+
 # Compiled
 *.exe
 *.test
