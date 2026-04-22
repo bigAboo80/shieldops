@@ -13,6 +13,10 @@ docs/
 .aider.*
 .DS_Store
 
+# Local scripts
+setup-dev-unraid.sh
+AGENTS.md
+
 # Compiled
 *.exe
 *.test
