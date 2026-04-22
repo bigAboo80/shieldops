@@ -1,0 +1,20 @@
+bin/
+
+# Private planning and strategy
+STRATEGY.md
+shieldops-mvp-plan.md
+docs/
+
+# Personal research files
+*.pdf
+*.xml
+
+# Tool configs
+.claude/
+.claudeignore
+.aider.*
+.DS_Store
+
+# Compiled
+*.exe
+*.test

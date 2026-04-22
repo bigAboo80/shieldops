@@ -1,0 +1,41 @@
+version: "3.8"
+
+# ShieldOps Dev Environment для Unraid
+# Ollama уже запущен отдельно — dev-контейнер обращается к нему по host network
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: shieldops-dev
+    hostname: shieldops-dev
+    volumes:
+      # Исходники проекта
+      - /mnt/user/appdata/shieldops:/workspace
+      # SSH ключи для git
+      - /root/.ssh:/home/dev/.ssh:ro
+      # Persistent Go cache
+      - go-cache:/home/dev/go
+      # Persistent npm cache  
+      - npm-cache:/home/dev/.npm
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Ollama доступен по host IP
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - GOPATH=/home/dev/go
+      - GOFLAGS=-mod=mod
+    # Доступ к host network для Ollama
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8822:22"    # SSH для доступа с рабочего PC
+      - "8080:8080"  # для будущего веб-UI
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+
+volumes:
+  go-cache:
+  npm-cache:
