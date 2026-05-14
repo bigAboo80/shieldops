@@ -44,7 +44,7 @@ make build
 ## Install
 
 ```bash
-go install github.com/aredcat/shieldops/cmd/scan@latest
+go install github.com/bigAboo80/shieldops/cmd/scan@latest
 ```
 
 ## Report
