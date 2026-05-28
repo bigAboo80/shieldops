@@ -82,4 +82,4 @@ Local dev environment (PostgreSQL + test cluster) is in `infra/dev-env/`.
 
 MVP — core scan pipeline works. FSTEK control mapping is in progress.
 
-Feedback welcome: open an issue or write to [Habr](https://habr.com).
+Feedback welcome: open an issue or write to [Habr](https://habr.com/ru/articles/1039100/).
