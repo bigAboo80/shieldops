@@ -5,10 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
+	"slices"
 
-	"github.com/shieldops/core/internal/graph"
+	"github.com/bigAboo80/shieldops/internal/graph"
 )
 
 type trivyResult struct {
@@ -22,77 +25,139 @@ type trivyResult struct {
 	} `json:"Results"`
 }
 
-func ScanImages(ctx context.Context, db *sql.DB) (int, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT uid, labels->>'image' as image
-		FROM assets
-		WHERE kind = 'Pod'
-		AND labels->>'image' IS NOT NULL
-		AND labels->>'image' != ''
-	`)
-	if err != nil {
-		return 0, fmt.Errorf("query pod images: %w", err)
-	}
-	defer rows.Close()
+type vuln struct{ id, severity, pkg, title string }
 
-	type podImage struct{ uid, image string }
-	var pods []podImage
-	seen := map[string]bool{}
-	for rows.Next() {
-		var p podImage
-		if err := rows.Scan(&p.uid, &p.image); err != nil {
-			continue
-		}
-		if !seen[p.image] {
-			seen[p.image] = true
-			pods = append(pods, p)
+// Runner describes how to invoke trivy. Command may wrap trivy, e.g.
+// "ssh scanner-host trivy", so images are pulled where bandwidth is cheap.
+type Runner struct {
+	Command  []string
+	CacheDir string
+}
+
+// ScanImages scans every unique pod image once and links found CVEs to all
+// pods running that image.
+func ScanImages(ctx context.Context, db *sql.DB, r Runner) (int, error) {
+	byImage, err := podsByImage(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	images := slices.Sorted(maps.Keys(byImage))
+
+	// Update the vulnerability DB once, then scan every image against it.
+	// A failed update is not fatal: trivy can still use a previously downloaded DB.
+	if len(images) > 0 {
+		if err := updateDB(ctx, r); err != nil {
+			fmt.Printf("    [trivy] DB update failed, using cached DB: %v\n", err)
 		}
 	}
 
 	edgeCount := 0
-	for _, p := range pods {
-		fmt.Printf("    [trivy] scanning %s\n", p.image)
-		var stderr bytes.Buffer
-		cmd := exec.CommandContext(ctx,
-			"trivy", "image",
-			"--cache-dir", "/tmp/trivy-cache",
-			"--format", "json",
-			"--severity", "CRITICAL,HIGH",
-			"--quiet",
-			p.image,
-		)
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+	for _, image := range images {
+		fmt.Printf("    [trivy] scanning %s\n", image)
+		vulns, err := scanImage(ctx, r, image)
+		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
+			return edgeCount, fmt.Errorf("scan %s: %w", image, err)
+		}
 		if err != nil {
-			fmt.Printf("    [trivy] skip %s: %v — %s\n", p.image, err, stderr.String())
+			fmt.Printf("    [trivy] skip %s: %v\n", image, err)
 			continue
 		}
-
-		var result trivyResult
-		if err := json.Unmarshal(out, &result); err != nil {
-			continue
-		}
-
-		// deduplicate CVEs per image
-		seenCVE := map[string]bool{}
-		for _, r := range result.Results {
-			for _, v := range r.Vulnerabilities {
-				if seenCVE[v.VulnerabilityID] {
-					continue
+		for _, uid := range byImage[image] {
+			for _, v := range vulns {
+				inserted, err := graph.InsertEdge(ctx, db, graph.Edge{
+					SourceUID: uid, TargetUID: uid, EdgeType: graph.EdgeHasCVE,
+					Properties: map[string]string{
+						"cve_id": v.id, "severity": v.severity, "package": v.pkg, "title": v.title, "image": image,
+					},
+				})
+				if err != nil {
+					return edgeCount, err
 				}
-				seenCVE[v.VulnerabilityID] = true
-				props := map[string]string{
-					"cve_id":   v.VulnerabilityID,
-					"severity": v.Severity,
-					"package":  v.PkgName,
-					"title":    v.Title,
+				if inserted {
+					edgeCount++
 				}
-				if err := graph.InsertEdge(ctx, db, p.uid, p.uid, "HAS_CVE", props); err != nil {
-					continue
-				}
-				edgeCount++
 			}
 		}
 	}
 	return edgeCount, nil
+}
+
+func podsByImage(ctx context.Context, db *sql.DB) (map[string][]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT uid, unnest(images) FROM assets WHERE kind = 'Pod'
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query pod images: %w", err)
+	}
+	defer rows.Close()
+
+	res := map[string][]string{}
+	for rows.Next() {
+		var uid, image string
+		if err := rows.Scan(&uid, &image); err != nil {
+			return nil, fmt.Errorf("scan pod image: %w", err)
+		}
+		res[image] = append(res[image], uid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pod images: %w", err)
+	}
+	return res, nil
+}
+
+// updateDB refreshes the vulnerability DB and the Java DB (needed for jar scanning).
+func updateDB(ctx context.Context, r Runner) error {
+	for _, flag := range []string{"--download-db-only", "--download-java-db-only"} {
+		if _, err := r.run(ctx, "image", flag, "--no-progress", "--timeout", "30m"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scanImage runs trivy and returns CRITICAL/HIGH vulnerabilities unique by CVE ID.
+func scanImage(ctx context.Context, r Runner, image string) ([]vuln, error) {
+	out, err := r.run(ctx, "image", "--skip-db-update", "--skip-java-db-update",
+		"--format", "json", "--severity", "CRITICAL,HIGH", "--quiet", image)
+	if err != nil {
+		return nil, err
+	}
+	return parseResult(out)
+}
+
+func (r Runner) run(ctx context.Context, args ...string) ([]byte, error) {
+	if r.CacheDir != "" {
+		args = append([]string{"--cache-dir", r.CacheDir}, args...)
+	}
+	command := r.Command
+	if len(command) == 0 {
+		command = []string{"trivy"}
+	}
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, command[0], slices.Concat(command[1:], args)...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("trivy: %w: %s", err, bytes.TrimSpace(stderr.Bytes()))
+	}
+	return out, nil
+}
+
+func parseResult(out []byte) ([]vuln, error) {
+	var result trivyResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parse trivy output: %w", err)
+	}
+	var vulns []vuln
+	seen := map[string]bool{}
+	for _, r := range result.Results {
+		for _, v := range r.Vulnerabilities {
+			if seen[v.VulnerabilityID] {
+				continue
+			}
+			seen[v.VulnerabilityID] = true
+			vulns = append(vulns, vuln{v.VulnerabilityID, v.Severity, v.PkgName, v.Title})
+		}
+	}
+	return vulns, nil
 }

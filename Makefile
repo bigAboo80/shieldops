@@ -13,7 +13,7 @@ lint:
 	golangci-lint run ./...
 
 scan: build
-	./bin/$(BINARY) scan --kubeconfig ~/.kube/config
+	./bin/$(BINARY) --kubeconfig $${KUBECONFIG:-$$HOME/.kube/config} -output report.html
 
 clean:
 	rm -rf bin/

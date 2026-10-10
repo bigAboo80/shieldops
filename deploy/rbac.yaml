@@ -1,0 +1,47 @@
+# Read-only identity for the ShieldOps scanner.
+# Secrets are listed metadata-only by the scanner, but RBAC cannot express
+# "metadata only", so `list secrets` is still required.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shieldops
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shieldops-scanner
+  namespace: shieldops
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shieldops-scanner-token
+  namespace: shieldops
+  annotations:
+    kubernetes.io/service-account.name: shieldops-scanner
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: shieldops-scanner
+rules:
+  - apiGroups: [""]
+    resources: [pods, serviceaccounts, services, secrets]
+    verbs: [get, list]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterrolebindings]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: shieldops-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: shieldops-scanner
+subjects:
+  - kind: ServiceAccount
+    name: shieldops-scanner
+    namespace: shieldops

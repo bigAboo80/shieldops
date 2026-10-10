@@ -20,3 +20,6 @@ AGENTS.md
 # Compiled
 *.exe
 *.test
+
+# Scan output
+report.html

@@ -3,100 +3,107 @@ package graph
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 
-	_ "github.com/lib/pq"
+	"github.com/bigAboo80/shieldops/internal/inventory"
+	"github.com/lib/pq"
 )
 
+//go:embed schema.sql
+var schema string
+
 type Edge struct {
-	SourceUID   string
-	TargetUID   string
-	EdgeType    string
-	Properties  map[string]string
+	SourceUID  string
+	TargetUID  string
+	EdgeType   string
+	Properties map[string]string
 }
 
-func InitDB(connStr string) (*sql.DB, error) {
+// InitDB opens the database and applies the idempotent schema.
+func InitDB(ctx context.Context, connStr string) (*sql.DB, error) {
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
 	return db, nil
 }
 
-func UpsertAsset(ctx context.Context, db *sql.DB, kind, name, namespace, uid string, labels map[string]string) error {
-	labelsJSON, err := json.Marshal(labels)
+// ReplaceAssets makes the assets table an exact copy of the current scan:
+// objects gone from the cluster are deleted together with their edges.
+func ReplaceAssets(ctx context.Context, db *sql.DB, assets []inventory.Asset) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("marshal labels: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
 	}
+	defer tx.Rollback()
 
-	_, err = db.ExecContext(ctx, `
-		INSERT INTO assets (kind, name, namespace, uid, labels)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT(uid) DO UPDATE SET
-			kind = EXCLUDED.kind,
-			name = EXCLUDED.name,
-			namespace = EXCLUDED.namespace,
-			labels = EXCLUDED.labels
-	`, kind, name, namespace, uid, labelsJSON)
-	if err != nil {
-		return fmt.Errorf("upsert asset: %w", err)
+	if _, err := tx.ExecContext(ctx, `TRUNCATE edges, assets`); err != nil {
+		return fmt.Errorf("truncate graph: %w", err)
 	}
-
+	for _, a := range assets {
+		labelsJSON, err := json.Marshal(a.Labels)
+		if err != nil {
+			return fmt.Errorf("marshal labels: %w", err)
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO assets (kind, name, namespace, uid, labels, images)
+			VALUES ($1, $2, $3, $4, $5, COALESCE($6::text[], '{}'))
+		`, a.Kind, a.Name, a.Namespace, a.UID, labelsJSON, pq.Array(a.Images))
+		if err != nil {
+			return fmt.Errorf("insert asset %s %s/%s: %w", a.Kind, a.Namespace, a.Name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit assets: %w", err)
+	}
 	return nil
 }
 
-func InsertEdge(ctx context.Context, db *sql.DB, sourceUID, targetUID, edgeType string, properties map[string]string) error {
-	propertiesJSON, err := json.Marshal(properties)
-	if err != nil {
-		return fmt.Errorf("marshal properties: %w", err)
+// InsertEdge stores an edge and reports whether it was new.
+func InsertEdge(ctx context.Context, db *sql.DB, e Edge) (bool, error) {
+	props := e.Properties
+	if props == nil {
+		props = map[string]string{}
 	}
-
-	_, err = db.ExecContext(ctx, `
+	propertiesJSON, err := json.Marshal(props)
+	if err != nil {
+		return false, fmt.Errorf("marshal properties: %w", err)
+	}
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO edges (source_uid, target_uid, edge_type, properties)
 		VALUES ($1, $2, $3, $4)
-	`, sourceUID, targetUID, edgeType, propertiesJSON)
+		ON CONFLICT DO NOTHING
+	`, e.SourceUID, e.TargetUID, e.EdgeType, propertiesJSON)
 	if err != nil {
-		return fmt.Errorf("insert edge: %w", err)
+		return false, fmt.Errorf("insert edge %s: %w", e.EdgeType, err)
 	}
-
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("insert edge rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
-func QueryEdges(ctx context.Context, db *sql.DB, edgeType string) ([]Edge, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT source_uid, target_uid, edge_type, properties
-		FROM edges
-		WHERE edge_type = $1
-	`, edgeType)
-	if err != nil {
-		return nil, fmt.Errorf("query edges: %w", err)
-	}
-	defer rows.Close()
-
-	var edges []Edge
-	for rows.Next() {
-		var edge Edge
-		var propertiesJSON string
-		if err := rows.Scan(&edge.SourceUID, &edge.TargetUID, &edge.EdgeType, &propertiesJSON); err != nil {
-			return nil, fmt.Errorf("scan edge: %w", err)
+func StoreEdges(ctx context.Context, db *sql.DB, edges []Edge) (int, error) {
+	count := 0
+	for _, e := range edges {
+		inserted, err := InsertEdge(ctx, db, e)
+		if err != nil {
+			return count, err
 		}
-
-		if err := json.Unmarshal([]byte(propertiesJSON), &edge.Properties); err != nil {
-			return nil, fmt.Errorf("unmarshal properties: %w", err)
+		if inserted {
+			count++
 		}
-
-		edges = append(edges, edge)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	return edges, nil
+	return count, nil
 }

@@ -61,11 +61,11 @@ func DetectClusterAdminSA(ctx context.Context, db *sql.DB) ([]Finding, error) {
 				{"ANZ.1", "Vulnerability detection and analysis", "K2/K3"},
 			},
 			Recommendation: "Bind ServiceAccount to minimal role. Remove ClusterRoleBinding with cluster-admin.",
-			Severity:    "Critical",
-			Title:       "Pod Running with Cluster-Admin ServiceAccount",
-			Description: fmt.Sprintf("Pod %s in namespace %s uses ServiceAccount %s bound to %s", podName, podNamespace, saName, roleName),
-			AttackPath:  []string{fmt.Sprintf("Pod: %s/%s", podNamespace, podName), fmt.Sprintf("SA: %s/%s", saNamespace, saName), fmt.Sprintf("Role: %s", roleName)},
-			Remediation: fmt.Sprintf("Remove cluster-admin from ServiceAccount %s/%s", saNamespace, saName),
+			Severity:       "Critical",
+			Title:          "Pod Running with Cluster-Admin ServiceAccount",
+			Description:    fmt.Sprintf("Pod %s in namespace %s uses ServiceAccount %s bound to %s", podName, podNamespace, saName, roleName),
+			AttackPath:     []string{fmt.Sprintf("Pod: %s/%s", podNamespace, podName), fmt.Sprintf("SA: %s/%s", saNamespace, saName), fmt.Sprintf("Role: %s", roleName)},
+			Remediation:    fmt.Sprintf("Remove cluster-admin from ServiceAccount %s/%s", saNamespace, saName),
 		})
 	}
 

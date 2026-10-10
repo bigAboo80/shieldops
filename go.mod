@@ -1,4 +1,4 @@
-module github.com/shieldops/core
+module github.com/bigAboo80/shieldops
 
 go 1.25.0
 
