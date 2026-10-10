@@ -1,156 +1,111 @@
 package graph
 
 import (
-	"context"
-	"database/sql"
-	"fmt"
-	"strings"
+	"slices"
 
+	"github.com/bigAboo80/shieldops/internal/inventory"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
-func getAssetUID(ctx context.Context, db *sql.DB, kind, name, namespace string) (string, error) {
-	var uid string
-	err := db.QueryRowContext(ctx, `
-		SELECT uid FROM assets 
-		WHERE kind = $1 AND name = $2 AND namespace = $3
-	`, kind, name, namespace).Scan(&uid)
-	if err != nil {
-		return "", fmt.Errorf("get asset uid: %w", err)
+const (
+	EdgeUsesSA       = "USES_SA"       // Pod -> ServiceAccount
+	EdgeBoundToRole  = "BOUND_TO_ROLE" // ServiceAccount -> ClusterRoleBinding, properties.role = ClusterRole name
+	EdgeMountsSecret = "MOUNTS_SECRET" // Pod -> Secret
+	EdgeExposedVia   = "EXPOSED_VIA"   // Pod -> Service (NodePort/LoadBalancer)
+	EdgeHasCVE       = "HAS_CVE"       // Pod -> Pod, properties describe the CVE
+)
+
+// BuildEdges derives graph edges from a scan snapshot. Edges only point at
+// objects present in the snapshot, so every endpoint exists in the assets table.
+func BuildEdges(s *inventory.Snapshot) []Edge {
+	saUIDs := map[string]string{}
+	for _, sa := range s.ServiceAccounts {
+		saUIDs[sa.Namespace+"/"+sa.Name] = string(sa.UID)
 	}
-	return uid, nil
-}
-
-func findPodsForService(ctx context.Context, cl *kubernetes.Clientset, ns string, selector map[string]string) ([]corev1.Pod, error) {
-	pods, err := cl.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: getLabelSelector(selector),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list pods for service: %w", err)
-	}
-	return pods.Items, nil
-}
-
-func getLabelSelector(selector map[string]string) string {
-	var selectors []string
-	for key, value := range selector {
-		selectors = append(selectors, fmt.Sprintf("%s=%s", key, value))
-	}
-	return strings.Join(selectors, ",")
-}
-
-func BuildEdges(ctx context.Context, cl *kubernetes.Clientset, db *sql.DB, ns string) (int, error) {
-	edgeCount := 0
-
-	// 1. USES_SA: for each pod, get pod.Spec.ServiceAccountName, find SA uid in assets table
-	pods, err := cl.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("list pods: %w", err)
+	secretUIDs := map[string]string{}
+	for _, sec := range s.Secrets {
+		secretUIDs[sec.Namespace+"/"+sec.Name] = string(sec.UID)
 	}
 
-	for _, pod := range pods.Items {
-		if pod.Spec.ServiceAccountName != "" {
-			saUID, err := getAssetUID(ctx, db, "ServiceAccount", pod.Spec.ServiceAccountName, pod.Namespace)
-			if err != nil {
+	var edges []Edge
+	for _, pod := range s.Pods {
+		saName := pod.Spec.ServiceAccountName
+		if saName == "" {
+			saName = "default"
+		}
+		if uid, ok := saUIDs[pod.Namespace+"/"+saName]; ok {
+			edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: uid, EdgeType: EdgeUsesSA})
+		}
+		for _, name := range podSecretNames(pod) {
+			if uid, ok := secretUIDs[pod.Namespace+"/"+name]; ok {
+				edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: uid, EdgeType: EdgeMountsSecret})
+			}
+		}
+	}
+
+	for _, crb := range s.ClusterRoleBindings {
+		if crb.RoleRef.Kind != "ClusterRole" {
+			continue
+		}
+		for _, subj := range crb.Subjects {
+			if subj.Kind != rbacv1.ServiceAccountKind {
 				continue
 			}
-
-			err = InsertEdge(ctx, db, string(pod.UID), saUID, "USES_SA", nil)
-			if err != nil {
-				continue
-			}
-			edgeCount++
-		}
-	}
-
-	// 2. BOUND_TO_ROLE: list ClusterRoleBindings, for each subject where Kind=ServiceAccount, find SA uid in assets
-	crbList, err := cl.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("list cluster role bindings: %w", err)
-	}
-
-	for _, crb := range crbList.Items {
-		for _, subject := range crb.Subjects {
-			if subject.Kind == "ServiceAccount" {
-				saUID, err := getAssetUID(ctx, db, "ServiceAccount", subject.Name, subject.Namespace)
-				if err != nil {
-					continue
-				}
-
-				err = InsertEdge(ctx, db, string(crb.UID), saUID, "BOUND_TO_ROLE", map[string]string{"role": crb.RoleRef.Name})
-				if err != nil {
-					continue
-				}
-				edgeCount++
+			if uid, ok := saUIDs[subj.Namespace+"/"+subj.Name]; ok {
+				edges = append(edges, Edge{SourceUID: uid, TargetUID: string(crb.UID), EdgeType: EdgeBoundToRole,
+					Properties: map[string]string{"role": crb.RoleRef.Name}})
 			}
 		}
 	}
 
-	// 4. MOUNTS_SECRET: for each pod volume with Secret, find secret uid in assets
-	for _, pod := range pods.Items {
-		for _, volume := range pod.Spec.Volumes {
-			if volume.Secret != nil {
-				secretUID, err := getAssetUID(ctx, db, "Secret", volume.Secret.SecretName, pod.Namespace)
-				if err != nil {
-					continue
-				}
-
-				err = InsertEdge(ctx, db, string(pod.UID), secretUID, "MOUNTS_SECRET", nil)
-				if err != nil {
-					continue
-				}
-				edgeCount++
-			}
+	for _, svc := range s.Services {
+		if svc.Spec.Type != corev1.ServiceTypeLoadBalancer && svc.Spec.Type != corev1.ServiceTypeNodePort {
+			continue
 		}
-
-		// Check container EnvFrom SecretRef
-		for _, container := range pod.Spec.Containers {
-			for _, envFrom := range container.EnvFrom {
-				if envFrom.SecretRef != nil {
-					secretUID, err := getAssetUID(ctx, db, "Secret", envFrom.SecretRef.Name, pod.Namespace)
-					if err != nil {
-						continue
-					}
-
-					err = InsertEdge(ctx, db, string(pod.UID), secretUID, "MOUNTS_SECRET", nil)
-					if err != nil {
-						continue
-					}
-					edgeCount++
-				}
+		// An empty selector matches nothing: such services point at manual Endpoints.
+		if len(svc.Spec.Selector) == 0 {
+			continue
+		}
+		sel := labels.SelectorFromSet(svc.Spec.Selector)
+		for _, pod := range s.Pods {
+			if pod.Namespace == svc.Namespace && sel.Matches(labels.Set(pod.Labels)) {
+				edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: string(svc.UID), EdgeType: EdgeExposedVia})
 			}
 		}
 	}
+	return edges
+}
 
-	// 3. EXPOSED_VIA: for each service that exposes pods, find pod uid in assets
-	services, err := cl.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("list services: %w", err)
-	}
-
-	for _, svc := range services.Items {
-		if svc.Spec.Type == corev1.ServiceTypeLoadBalancer || svc.Spec.Type == corev1.ServiceTypeNodePort {
-			// For simplicity, we'll just check if service has selector
-			if svc.Spec.Selector != nil {
-				pods, err := cl.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-					LabelSelector: getLabelSelector(svc.Spec.Selector),
-				})
-				if err != nil {
-					continue
-				}
-
-				for _, pod := range pods.Items {
-					err = InsertEdge(ctx, db, string(pod.UID), string(svc.UID), "EXPOSED_VIA", nil)
-					if err != nil {
-						continue
-					}
-					edgeCount++
+// podSecretNames lists unique Secrets a pod consumes via volumes, projected
+// volumes, envFrom and env valueFrom in init and regular containers.
+func podSecretNames(pod corev1.Pod) []string {
+	var names []string
+	for _, v := range pod.Spec.Volumes {
+		if v.Secret != nil {
+			names = append(names, v.Secret.SecretName)
+		}
+		if v.Projected != nil {
+			for _, src := range v.Projected.Sources {
+				if src.Secret != nil {
+					names = append(names, src.Secret.Name)
 				}
 			}
 		}
 	}
-
-	return edgeCount, nil
+	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		for _, ef := range c.EnvFrom {
+			if ef.SecretRef != nil {
+				names = append(names, ef.SecretRef.Name)
+			}
+		}
+		for _, env := range c.Env {
+			if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+				names = append(names, env.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }

@@ -44,11 +44,11 @@ func DetectExposedSecrets(ctx context.Context, db *sql.DB) ([]Finding, error) {
 				{"UPD.3", "Access control to protected objects", "K1/K2/K3"},
 			},
 			Recommendation: "Remove Secret mount from internet-exposed pod or apply NetworkPolicy.",
-			Severity:    "High",
-			Title:       "Secret Mounted in Internet-Exposed Pod",
-			Description: fmt.Sprintf("Secret %s mounted in pod %s/%s exposed via %s", secretName, podNamespace, podName, serviceName),
-			AttackPath:  []string{"Internet", fmt.Sprintf("Service: %s", serviceName), fmt.Sprintf("Pod: %s/%s", podNamespace, podName), fmt.Sprintf("Secret: %s", secretName)},
-			Remediation: "Move secret to external vault or remove internet exposure",
+			Severity:       "High",
+			Title:          "Secret Mounted in Internet-Exposed Pod",
+			Description:    fmt.Sprintf("Secret %s mounted in pod %s/%s exposed via %s", secretName, podNamespace, podName, serviceName),
+			AttackPath:     []string{"Internet", fmt.Sprintf("Service: %s", serviceName), fmt.Sprintf("Pod: %s/%s", podNamespace, podName), fmt.Sprintf("Secret: %s", secretName)},
+			Remediation:    "Move secret to external vault or remove internet exposure",
 		})
 	}
 

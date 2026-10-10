@@ -2,14 +2,14 @@ package report
 
 import (
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
-	"github.com/shieldops/core/internal/detectors"
+	"github.com/bigAboo80/shieldops/internal/detectors"
 )
 
 func buildComplianceTable(findings []detectors.Finding) string {
-	type controlMeta struct{ desc, class string }
 	allControls := []struct{ id, desc, class string }{
 		{"UPD.2", "Access attribute management", "K1/K2/K3"},
 		{"UPD.3", "Access control to protected objects", "K1/K2/K3"},
@@ -32,7 +32,10 @@ func buildComplianceTable(findings []detectors.Finding) string {
 			// deduplicate by Title
 			alreadyAdded := false
 			for _, existing := range violated[c.ID] {
-				if existing.Title == f.Title { alreadyAdded = true; break }
+				if existing.Title == f.Title {
+					alreadyAdded = true
+					break
+				}
 			}
 			if !alreadyAdded {
 				violated[c.ID] = append(violated[c.ID], f)
@@ -49,14 +52,15 @@ func buildComplianceTable(findings []detectors.Finding) string {
 		if len(ff) > 0 {
 			status = `<span style="color:#f59e0b;font-weight:600">&#9888; FAIL</span>`
 			var titles []string
-			for _, f := range ff { titles = append(titles, f.Title) }
+			for _, f := range ff {
+				titles = append(titles, html.EscapeString(f.Title))
+			}
 			findCell = strings.Join(titles, "<br>")
-			recCell = ff[0].Recommendation
+			recCell = html.EscapeString(ff[0].Recommendation)
 		}
 		b.WriteString(fmt.Sprintf(`<tr><td><strong>%s</strong></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`, c.id, c.desc, c.class, status, findCell, recCell))
 	}
 	b.WriteString("</tbody></table>")
-	_ = controlMeta{}
 	return b.String()
 }
 
@@ -89,14 +93,18 @@ h1{color:#00B4D8}.header{text-align:center;border-bottom:2px solid #00B4D8;paddi
 	}
 	for _, f := range findings {
 		sev, badge := "high", "badge-high"
-		if f.Severity == "Critical" { sev, badge = "critical", "badge-critical" }
-		b.WriteString(fmt.Sprintf(`<div class="card %s"><span class="badge %s">%s</span><h3>%s</h3><p>%s</p><div class="path">`, sev, badge, f.Severity, f.Title, f.Description))
+		if f.Severity == "Critical" {
+			sev, badge = "critical", "badge-critical"
+		}
+		b.WriteString(fmt.Sprintf(`<div class="card %s"><span class="badge %s">%s</span><h3>%s</h3><p>%s</p><div class="path">`, sev, badge, html.EscapeString(f.Severity), html.EscapeString(f.Title), html.EscapeString(f.Description)))
 		for i, step := range f.AttackPath {
-			if i > 0 { b.WriteString(`<span class="arrow">→</span>`) }
-			b.WriteString(fmt.Sprintf(`<span class="step">%s</span>`, step))
+			if i > 0 {
+				b.WriteString(`<span class="arrow">→</span>`)
+			}
+			b.WriteString(fmt.Sprintf(`<span class="step">%s</span>`, html.EscapeString(step)))
 		}
 		b.WriteString(`</div><div class="fix"><strong>Remediation:</strong> `)
-		b.WriteString(f.Remediation)
+		b.WriteString(html.EscapeString(f.Remediation))
 		b.WriteString(`</div></div>`)
 	}
 	b.WriteString(buildComplianceTable(findings))

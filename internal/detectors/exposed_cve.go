@@ -35,7 +35,7 @@ func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB) ([]Finding, error)
 		}
 		var cves []map[string]string
 		if err := json.Unmarshal([]byte(cvesJSON), &cves); err != nil {
-			continue
+			return nil, fmt.Errorf("unmarshal CVEs of pod %s/%s: %w", namespace, name, err)
 		}
 		// deduplicate by cve_id
 		seenID := map[string]bool{}
@@ -63,9 +63,9 @@ func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB) ([]Finding, error)
 				{"ZTS.1", "Security management function separation", "K1/K2/K3"},
 			},
 			Recommendation: "Update container image to version with patched CVE. Apply NetworkPolicy.",
-			Severity:    "Critical",
-			Title:       "Internet-Exposed Pod with Known CVE",
-			Description: fmt.Sprintf("Pod %s/%s has %d unique CVEs, top: %v", namespace, name, len(unique), cveIDs),
+			Severity:       "Critical",
+			Title:          "Internet-Exposed Pod with Known CVE",
+			Description:    fmt.Sprintf("Pod %s/%s has %d unique CVEs, top: %v", namespace, name, len(unique), cveIDs),
 			AttackPath: []string{
 				"Internet",
 				fmt.Sprintf("Pod: %s/%s", namespace, name),
