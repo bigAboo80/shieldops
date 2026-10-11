@@ -6,11 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -24,37 +24,46 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const usage = `ShieldOps — Kubernetes security scanner
+type command struct {
+	summary string
+	run     func(ctx context.Context, args []string) error
+}
 
-Usage:
-  shieldops scan  [flags]   scan the cluster once
-  shieldops serve [flags]   scan on a schedule and serve the latest report
+// commands of the edition. Other files add theirs in init, so an edition is
+// the set of files it is built from.
+var commands = map[string]command{
+	"scan": {"scan the cluster once", runScanCmd},
+}
 
-Run "shieldops <command> -h" for flags.
-`
+func usage() string {
+	var b strings.Builder
+	b.WriteString("ShieldOps — Kubernetes security scanner\n\nUsage:\n")
+	for _, name := range slices.Sorted(maps.Keys(commands)) {
+		fmt.Fprintf(&b, "  shieldops %-6s [flags]   %s\n", name, commands[name].summary)
+	}
+	b.WriteString("\nRun \"shieldops <command> -h\" for flags.\n")
+	return b.String()
+}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, usage())
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var err error
-	switch os.Args[1] {
-	case "scan":
-		err = runScanCmd(ctx, os.Args[2:])
-	case "serve":
-		err = runServeCmd(ctx, os.Args[2:])
-	case "help", "-h", "--help":
-		fmt.Print(usage)
+	name := os.Args[1]
+	if name == "help" || name == "-h" || name == "--help" {
+		fmt.Print(usage())
 		return
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
+	}
+	cmd, ok := commands[name]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", name, usage())
 		os.Exit(2)
 	}
-	if err != nil {
+	if err := cmd.run(ctx, os.Args[2:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -117,7 +126,8 @@ func runScanCmd(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	data, err := scan(ctx, cfg, kube, db)
+	res, err := scan(ctx, cfg, kube, db)
+	data := res.Data
 	if *output != "" && len(data.Findings)+data.Assets > 0 {
 		if werr := writeReport(*output, data); werr != nil {
 			return werr
@@ -132,88 +142,8 @@ func runScanCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runServeCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	var cfg scanConfig
-	cfg.register(fs)
-	interval := fs.Duration("interval", 6*time.Hour, "time between scans")
-	listen := fs.String("listen", "127.0.0.1:8080", "report address; keep it on loopback and use kubectl port-forward")
-	reportPath := fs.String("report", "", "where to keep the latest report (default: next to -db)")
-	fs.Parse(args)
-	if *reportPath == "" {
-		*reportPath = filepath.Join(filepath.Dir(cfg.db), "report.html")
-	}
-	if host, _, err := net.SplitHostPort(*listen); err != nil {
-		return fmt.Errorf("parse -listen: %w", err)
-	} else if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		fmt.Fprintf(os.Stderr, "WARNING: the report has no authentication and is served on %s\n", *listen)
-	}
-
-	kube, db, err := connect(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	srv := &http.Server{Addr: *listen, Handler: reportHandler(*reportPath), ReadHeaderTimeout: 10 * time.Second}
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- srv.ListenAndServe() }()
-	defer srv.Close()
-	fmt.Printf("[✓] Serving report on http://%s, scanning every %s\n", *listen, *interval)
-
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
-	for {
-		data, err := scan(ctx, cfg, kube, db)
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return nil
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Scan error: %v\n", err)
-		}
-		// A partial scan still shows what was found, the next one replaces it.
-		if len(data.Findings)+data.Assets > 0 {
-			if err := writeReport(*reportPath, data); err != nil {
-				fmt.Fprintf(os.Stderr, "Report error: %v\n", err)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-srvErr:
-			return fmt.Errorf("serve report: %w", err)
-		case <-ticker.C:
-		}
-	}
-}
-
-// reportHandler serves only the report file. The page is static, so it gets
-// the strictest headers that still allow its inline styles.
-func reportHandler(path string) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Cache-Control", "no-store")
-		body, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "First scan is still running, reload later.", http.StatusServiceUnavailable)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Cannot read report.", http.StatusInternalServerError)
-			return
-		}
-		h.Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(body)
-	})
-	return mux
-}
-
-func connect(ctx context.Context, cfg scanConfig) (*kubernetes.Clientset, *sql.DB, error) {
+// connect opens the cluster and the database; schemas are passed to graph.Open.
+func connect(ctx context.Context, cfg scanConfig, schemas ...string) (*kubernetes.Clientset, *sql.DB, error) {
 	fmt.Println("ShieldOps Scanner v0.2")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	kube, err := connector.NewClient(cfg.kubeconfig, cfg.kubeContext)
@@ -225,7 +155,7 @@ func connect(ctx context.Context, cfg scanConfig) (*kubernetes.Clientset, *sql.D
 	} else {
 		fmt.Printf("[✓] Using kubeconfig %s\n", cfg.kubeconfig)
 	}
-	db, err := graph.Open(ctx, cfg.db)
+	db, err := graph.Open(ctx, cfg.db, schemas...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open database: %w", err)
 	}
@@ -233,14 +163,24 @@ func connect(ctx context.Context, cfg scanConfig) (*kubernetes.Clientset, *sql.D
 	return kube, db, nil
 }
 
+type scanResult struct {
+	report.Data
+	// Recorded: the findings are saved, Complete lists the detectors whose
+	// results are complete.
+	Recorded bool
+	Complete []string
+}
+
 // scan runs one full scan and records it. On error it returns what was
 // found so far; such a scan is marked failed and never used as a baseline.
-func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sql.DB) (data report.Data, err error) {
+func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sql.DB) (res scanResult, err error) {
+	data := &res.Data
 	data.Generated = time.Now()
 	scanID, err := graph.BeginScan(ctx, db)
 	if err != nil {
-		return data, err
+		return res, err
 	}
+	data.ScanID = scanID
 	defer func() {
 		// Record the outcome even when ctx is cancelled mid-scan.
 		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -253,12 +193,12 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 	fmt.Printf("\n[*] Scan #%d: collecting assets...\n", scanID)
 	snap, err := inventory.Collect(apiCtx, kube, cfg.namespace)
 	if err != nil {
-		return data, fmt.Errorf("inventory: %w", err)
+		return res, fmt.Errorf("inventory: %w", err)
 	}
 	assets := snap.Assets()
 	data.Assets = len(assets)
 	if err := graph.StoreAssets(ctx, db, scanID, assets); err != nil {
-		return data, fmt.Errorf("store assets: %w", err)
+		return res, fmt.Errorf("store assets: %w", err)
 	}
 	fmt.Printf("[✓] Discovered %d assets\n", len(assets))
 
@@ -277,7 +217,7 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 		edges = append(edges, cveEdges...)
 	}
 	if data.Edges, err = graph.StoreEdges(ctx, db, scanID, edges); err != nil {
-		return data, fmt.Errorf("store edges: %w", err)
+		return res, fmt.Errorf("store edges: %w", err)
 	}
 	fmt.Printf("[✓] Built graph with %d edges\n", data.Edges)
 
@@ -296,10 +236,11 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 		complete = append(complete, d.ID)
 	}
 	if data.Delta, err = detectors.Record(ctx, db, scanID, data.Findings, complete); err != nil {
-		return data, err
+		return res, err
 	}
-	printFindings(data)
-	return data, errors.Join(append(detectErrs, trivyErr)...)
+	res.Recorded, res.Complete = true, complete
+	printFindings(*data)
+	return res, errors.Join(append(detectErrs, trivyErr)...)
 }
 
 func printFindings(d report.Data) {

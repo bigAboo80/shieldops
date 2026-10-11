@@ -1,5 +1,4 @@
 # Read-only identity for running the ShieldOps CLI against a cluster.
-# (The Helm chart in deploy/helm creates its own identity for in-cluster mode.)
 #
 # Secrets are deliberately absent: RBAC cannot grant "metadata only", and a
 # token allowed to list Secrets can read their values. ShieldOps learns which

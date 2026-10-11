@@ -20,6 +20,7 @@ var tmpl = template.Must(template.New("report").Parse(reportHTML))
 
 // Data is everything a report shows.
 type Data struct {
+	ScanID    int64
 	Generated time.Time
 	Assets    int
 	Edges     int

@@ -18,4 +18,4 @@ COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=build /out/shieldops /usr/local/bin/shieldops
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/shieldops"]
-CMD ["serve"]
+CMD ["help"]
