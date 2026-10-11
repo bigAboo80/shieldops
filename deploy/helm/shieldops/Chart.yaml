@@ -1,0 +1,7 @@
+apiVersion: v2
+name: shieldops
+description: Agentless Kubernetes security scanner that works like a DevSecOps engineer on duty
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+home: https://github.com/bigAboo80/shieldops

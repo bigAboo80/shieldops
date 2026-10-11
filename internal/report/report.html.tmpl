@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>ShieldOps Security Report</title><style>
+body{background:#0D1B2A;color:#fff;font-family:'Segoe UI',sans-serif;margin:0;padding:20px}
+h1{color:#00B4D8}h2{color:#00B4D8;margin-top:40px}.header{text-align:center;border-bottom:2px solid #00B4D8;padding-bottom:20px;margin-bottom:30px}
+.summary{background:#1b263b;border-radius:10px;padding:20px;margin-bottom:30px;display:flex;justify-content:space-around}
+.stat{text-align:center}.stat-num{font-size:2em;color:#00B4D8;font-weight:bold}
+.card{background:#1b263b;border-radius:10px;padding:20px;margin-bottom:20px}
+.critical{border-left:5px solid #ff4d4d}.high{border-left:5px solid #ff9933}.resolved{border-left:5px solid #06D6A0;opacity:.8}
+.badge{display:inline-block;padding:5px 12px;border-radius:5px;font-weight:bold;font-size:0.85em;margin-right:6px}
+.badge-critical{background:#ff4d4d}.badge-high{background:#ff9933}.badge-new{background:#7c3aed}.badge-resolved{background:#06D6A0;color:#0D1B2A}
+.path{display:flex;align-items:center;flex-wrap:wrap;margin:15px 0}
+.step{padding:8px 12px;background:#3a4a6c;border-radius:5px;margin:4px}
+.arrow{color:#00B4D8;margin:0 5px;font-size:1.2em}
+.fix{background:#1a3a1a;border-left:5px solid #06D6A0;padding:15px;border-radius:5px;margin-top:15px}
+.footer{text-align:center;margin-top:30px;border-top:2px solid #00B4D8;padding-top:20px;color:#888}
+.ok{color:#22c55e;font-weight:600}.fail{color:#f59e0b;font-weight:600}
+.ctable{width:100%;border-collapse:collapse;margin-top:24px;font-size:13px}.ctable th{background:#1e293b;color:#94a3b8;padding:10px 12px;text-align:left;border-bottom:2px solid #334155}.ctable td{padding:9px 12px;border-bottom:1px solid #1e293b;vertical-align:top}.ctable tr:hover td{background:#0f172a}
+</style></head><body>
+<div class="header"><h1>ShieldOps Security Report</h1><p>{{.Generated.Format "2006-01-02 15:04:05 MST"}}</p></div>
+<div class="summary">
+<div class="stat"><div class="stat-num">{{.Assets}}</div><div>Assets</div></div>
+<div class="stat"><div class="stat-num">{{.Edges}}</div><div>Edges</div></div>
+<div class="stat"><div class="stat-num">{{len .Findings}}</div><div>Findings</div></div>
+{{- if .Baseline}}
+<div class="stat"><div class="stat-num">{{.New}}</div><div>New since last scan</div></div>
+<div class="stat"><div class="stat-num">{{len .Resolved}}</div><div>Resolved</div></div>
+{{- end}}
+</div>
+{{- if not .Findings}}
+<div class="card"><h3 style="color:#06D6A0">No critical findings detected</h3></div>
+{{- end}}
+{{- range .Findings}}
+<div class="card {{if eq .Severity "Critical"}}critical{{else}}high{{end}}">
+<span class="badge {{if eq .Severity "Critical"}}badge-critical{{else}}badge-high{{end}}">{{.Severity}}</span>
+{{- if .New}}<span class="badge badge-new">NEW</span>{{end}}
+<h3>{{.Title}}</h3><p>{{.Description}}</p>
+<div class="path">{{range $i, $step := .AttackPath}}{{if $i}}<span class="arrow">→</span>{{end}}<span class="step">{{$step}}</span>{{end}}</div>
+<div class="fix"><strong>Remediation:</strong> {{.Remediation}}</div>
+</div>
+{{- end}}
+{{- if .Resolved}}
+<h2>Resolved since last scan</h2>
+{{- range .Resolved}}
+<div class="card resolved"><span class="badge badge-resolved">RESOLVED</span><h3>{{.Title}}</h3><p>{{.Description}}</p></div>
+{{- end}}
+{{- end}}
+<h2>FSTEK Order No.17 Compliance</h2>
+<table class="ctable"><thead><tr><th>ID</th><th>Description</th><th>Class</th><th>Status</th><th>Findings</th><th>Recommendation</th></tr></thead><tbody>
+{{- range .Controls}}
+<tr><td><strong>{{.ID}}</strong></td><td>{{.Description}}</td><td>{{.Class}}</td>
+{{- if .Titles}}<td><span class="fail">&#9888; FAIL</span></td><td>{{range $i, $t := .Titles}}{{if $i}}<br>{{end}}{{$t}}{{end}}</td><td>{{.Recommendation}}</td>
+{{- else}}<td><span class="ok">&#10003; OK</span></td><td>&#8212;</td><td>&#8212;</td>{{end}}</tr>
+{{- end}}
+</tbody></table>
+<div class="footer">ShieldOps · shieldops.tech</div>
+</body></html>

@@ -3,7 +3,6 @@ package trivy
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,13 +33,10 @@ type Runner struct {
 	CacheDir string
 }
 
-// ScanImages scans every unique pod image once and links found CVEs to all
-// pods running that image.
-func ScanImages(ctx context.Context, db *sql.DB, r Runner) (int, error) {
-	byImage, err := podsByImage(ctx, db)
-	if err != nil {
-		return 0, err
-	}
+// ScanImages scans every unique image once and returns HAS_CVE edges for all
+// pods running it. byImage maps an image to pod UIDs. On error the edges
+// found so far are returned.
+func ScanImages(ctx context.Context, r Runner, byImage map[string][]string) ([]graph.Edge, error) {
 	images := slices.Sorted(maps.Keys(byImage))
 
 	// Update the vulnerability DB once, then scan every image against it.
@@ -51,12 +47,12 @@ func ScanImages(ctx context.Context, db *sql.DB, r Runner) (int, error) {
 		}
 	}
 
-	edgeCount := 0
+	var edges []graph.Edge
 	for _, image := range images {
 		fmt.Printf("    [trivy] scanning %s\n", image)
 		vulns, err := scanImage(ctx, r, image)
 		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
-			return edgeCount, fmt.Errorf("scan %s: %w", image, err)
+			return edges, fmt.Errorf("scan %s: %w", image, err)
 		}
 		if err != nil {
 			fmt.Printf("    [trivy] skip %s: %v\n", image, err)
@@ -64,45 +60,16 @@ func ScanImages(ctx context.Context, db *sql.DB, r Runner) (int, error) {
 		}
 		for _, uid := range byImage[image] {
 			for _, v := range vulns {
-				inserted, err := graph.InsertEdge(ctx, db, graph.Edge{
+				edges = append(edges, graph.Edge{
 					SourceUID: uid, TargetUID: uid, EdgeType: graph.EdgeHasCVE,
 					Properties: map[string]string{
 						"cve_id": v.id, "severity": v.severity, "package": v.pkg, "title": v.title, "image": image,
 					},
 				})
-				if err != nil {
-					return edgeCount, err
-				}
-				if inserted {
-					edgeCount++
-				}
 			}
 		}
 	}
-	return edgeCount, nil
-}
-
-func podsByImage(ctx context.Context, db *sql.DB) (map[string][]string, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT uid, unnest(images) FROM assets WHERE kind = 'Pod'
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query pod images: %w", err)
-	}
-	defer rows.Close()
-
-	res := map[string][]string{}
-	for rows.Next() {
-		var uid, image string
-		if err := rows.Scan(&uid, &image); err != nil {
-			return nil, fmt.Errorf("scan pod image: %w", err)
-		}
-		res[image] = append(res[image], uid)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate pod images: %w", err)
-	}
-	return res, nil
+	return edges, nil
 }
 
 // updateDB refreshes the vulnerability DB and the Java DB (needed for jar scanning).

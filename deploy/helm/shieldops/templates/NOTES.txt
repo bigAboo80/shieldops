@@ -1,0 +1,12 @@
+ShieldOps scans the cluster every {{ .Values.scan.interval }}. The first scan starts now.
+
+Follow the scan:
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "shieldops.fullname" . }}
+
+Open the latest report (access is limited to users allowed to port-forward in this namespace):
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "shieldops.fullname" . }} 8080:8080
+  open http://127.0.0.1:8080
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence is disabled, scan history is lost on every restart.
+{{- end }}

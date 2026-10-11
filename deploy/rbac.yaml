@@ -1,6 +1,12 @@
-# Read-only identity for the ShieldOps scanner.
-# Secrets are listed metadata-only by the scanner, but RBAC cannot express
-# "metadata only", so `list secrets` is still required.
+# Read-only identity for running the ShieldOps CLI against a cluster.
+# (The Helm chart in deploy/helm creates its own identity for in-cluster mode.)
+#
+# Secrets are deliberately absent: RBAC cannot grant "metadata only", and a
+# token allowed to list Secrets can read their values. ShieldOps learns which
+# Secrets a pod uses from the pod spec.
+#
+# Get a short-lived token instead of storing a long-lived one:
+#   kubectl -n shieldops create token shieldops-scanner --duration=1h
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -12,22 +18,13 @@ metadata:
   name: shieldops-scanner
   namespace: shieldops
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: shieldops-scanner-token
-  namespace: shieldops
-  annotations:
-    kubernetes.io/service-account.name: shieldops-scanner
-type: kubernetes.io/service-account-token
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: shieldops-scanner
 rules:
   - apiGroups: [""]
-    resources: [pods, serviceaccounts, services, secrets]
+    resources: [pods, serviceaccounts, services]
     verbs: [get, list]
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [clusterrolebindings]

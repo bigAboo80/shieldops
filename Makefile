@@ -1,10 +1,10 @@
-.PHONY: build test lint scan clean
+.PHONY: build test lint scan image clean
 
 BINARY=shieldops
-GOFLAGS=-ldflags="-s -w"
+GOFLAGS=-trimpath -ldflags="-s -w"
 
 build:
-	go build $(GOFLAGS) -o bin/$(BINARY) ./cmd/scan/
+	CGO_ENABLED=0 go build $(GOFLAGS) -o bin/$(BINARY) ./cmd/shieldops/
 
 test:
 	go test -race -count=1 ./...
@@ -13,7 +13,10 @@ lint:
 	golangci-lint run ./...
 
 scan: build
-	./bin/$(BINARY) --kubeconfig $${KUBECONFIG:-$$HOME/.kube/config} -output report.html
+	./bin/$(BINARY) scan -output report.html
+
+image:
+	docker build -t shieldops:dev .
 
 clean:
 	rm -rf bin/

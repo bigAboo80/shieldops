@@ -1,8 +1,6 @@
 package graph
 
 import (
-	"slices"
-
 	"github.com/bigAboo80/shieldops/internal/inventory"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -24,10 +22,6 @@ func BuildEdges(s *inventory.Snapshot) []Edge {
 	for _, sa := range s.ServiceAccounts {
 		saUIDs[sa.Namespace+"/"+sa.Name] = string(sa.UID)
 	}
-	secretUIDs := map[string]string{}
-	for _, sec := range s.Secrets {
-		secretUIDs[sec.Namespace+"/"+sec.Name] = string(sec.UID)
-	}
 
 	var edges []Edge
 	for _, pod := range s.Pods {
@@ -38,10 +32,8 @@ func BuildEdges(s *inventory.Snapshot) []Edge {
 		if uid, ok := saUIDs[pod.Namespace+"/"+saName]; ok {
 			edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: uid, EdgeType: EdgeUsesSA})
 		}
-		for _, name := range podSecretNames(pod) {
-			if uid, ok := secretUIDs[pod.Namespace+"/"+name]; ok {
-				edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: uid, EdgeType: EdgeMountsSecret})
-			}
+		for _, name := range inventory.PodSecretNames(pod) {
+			edges = append(edges, Edge{SourceUID: string(pod.UID), TargetUID: inventory.SecretUID(pod.Namespace, name), EdgeType: EdgeMountsSecret})
 		}
 	}
 
@@ -76,36 +68,4 @@ func BuildEdges(s *inventory.Snapshot) []Edge {
 		}
 	}
 	return edges
-}
-
-// podSecretNames lists unique Secrets a pod consumes via volumes, projected
-// volumes, envFrom and env valueFrom in init and regular containers.
-func podSecretNames(pod corev1.Pod) []string {
-	var names []string
-	for _, v := range pod.Spec.Volumes {
-		if v.Secret != nil {
-			names = append(names, v.Secret.SecretName)
-		}
-		if v.Projected != nil {
-			for _, src := range v.Projected.Sources {
-				if src.Secret != nil {
-					names = append(names, src.Secret.Name)
-				}
-			}
-		}
-	}
-	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
-		for _, ef := range c.EnvFrom {
-			if ef.SecretRef != nil {
-				names = append(names, ef.SecretRef.Name)
-			}
-		}
-		for _, env := range c.Env {
-			if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
-				names = append(names, env.ValueFrom.SecretKeyRef.Name)
-			}
-		}
-	}
-	slices.Sort(names)
-	return slices.Compact(names)
 }

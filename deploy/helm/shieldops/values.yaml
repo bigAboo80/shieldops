@@ -1,0 +1,49 @@
+image:
+  repository: ghcr.io/bigaboo80/shieldops
+  # Defaults to the chart appVersion.
+  tag: ""
+  # Pin the image by digest in production, e.g. sha256:4f2c...
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+scan:
+  interval: 6h
+  # Namespace to scan; empty scans the whole cluster.
+  namespace: ""
+  # Scans kept in the database for comparison.
+  keepScans: 100
+
+trivy:
+  enabled: true
+  timeout: 20m
+
+persistence:
+  # Without persistence the scan history is lost on every restart.
+  enabled: true
+  size: 5Gi
+  storageClass: ""
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    # trivy peaks while unpacking images
+    memory: 2Gi
+
+networkPolicy:
+  enabled: true
+  # Egress to kube-apiserver, image registries and the trivy DB. Narrow the
+  # CIDRs to your API server and registries (or mirror) in production.
+  egressCIDRs:
+    - 0.0.0.0/0
+  egressPorts:
+    - 443
+    - 6443
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
