@@ -25,9 +25,10 @@ type Edge struct {
 }
 
 // Open opens (creating if needed) the SQLite database at path and applies the
-// idempotent schema. The file is created owner-only: it holds a map of the
+// idempotent graph schema, then the schemas of other packages that store
+// their data here. The file is created owner-only: it holds a map of the
 // cluster's weaknesses.
-func Open(ctx context.Context, path string) (*sql.DB, error) {
+func Open(ctx context.Context, path string, schemas ...string) (*sql.DB, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create database file: %w", err)
@@ -42,9 +43,11 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	}
 	// One connection: a single writer, and pragmas apply to every statement.
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+	for _, sch := range append([]string{schema}, schemas...) {
+		if _, err := db.ExecContext(ctx, sch); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("apply schema: %w", err)
+		}
 	}
 	return db, nil
 }
