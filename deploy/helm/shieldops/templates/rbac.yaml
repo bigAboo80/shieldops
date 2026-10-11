@@ -1,0 +1,30 @@
+# Read-only. Secrets are deliberately absent: RBAC cannot grant "metadata
+# only", and a token allowed to list Secrets can read their values.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shieldops.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "shieldops.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, serviceaccounts, services]
+    verbs: [get, list]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterrolebindings]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shieldops.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "shieldops.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shieldops.fullname" . }}-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "shieldops.fullname" . }}
+    namespace: {{ .Release.Namespace }}

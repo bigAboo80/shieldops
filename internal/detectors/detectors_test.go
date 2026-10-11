@@ -3,7 +3,8 @@ package detectors_test
 import (
 	"context"
 	"database/sql"
-	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/bigAboo80/shieldops/internal/detectors"
@@ -15,21 +16,27 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// These tests need a real PostgreSQL: SHIELDOPS_TEST_DB=postgres://... go test ./...
-// They share one database, so they do not run in parallel.
-
 func om(ns, name string, lbl map[string]string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID(ns + "/" + name), Labels: lbl}
 }
 
+// replica is a pod of Deployment web.
+func replica(name string, spec corev1.PodSpec) corev1.Pod {
+	ctrl := true
+	meta := om("app", name, map[string]string{"app": "web", "pod-template-hash": "abc"})
+	meta.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "web-abc", Controller: &ctrl}}
+	return corev1.Pod{ObjectMeta: meta, Spec: spec}
+}
+
 func scenario() *inventory.Snapshot {
-	web := map[string]string{"app": "web"}
 	secretVol := corev1.Volume{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "db-creds"}}}
+	webSpec := corev1.PodSpec{Volumes: []corev1.Volume{secretVol}}
 	return &inventory.Snapshot{
 		Pods: []corev1.Pod{
 			{ObjectMeta: om("app", "admin-pod", nil), Spec: corev1.PodSpec{ServiceAccountName: "admin-sa"}},
 			{ObjectMeta: om("app", "viewer-pod", nil), Spec: corev1.PodSpec{ServiceAccountName: "viewer-sa"}},
-			{ObjectMeta: om("app", "web", web), Spec: corev1.PodSpec{Volumes: []corev1.Volume{secretVol}}},
+			replica("web-abc-1", webSpec),
+			replica("web-abc-2", webSpec),
 			{ObjectMeta: om("app", "worker", nil), Spec: corev1.PodSpec{Volumes: []corev1.Volume{secretVol}}},
 		},
 		ServiceAccounts: []corev1.ServiceAccount{
@@ -44,77 +51,168 @@ func scenario() *inventory.Snapshot {
 				Subjects: []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Namespace: "app", Name: "viewer-sa"}}},
 		},
 		Services: []corev1.Service{
-			{ObjectMeta: om("app", "web-np", nil), Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort, Selector: web}},
+			{ObjectMeta: om("app", "web-np", nil), Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort, Selector: map[string]string{"app": "web"}}},
 		},
-		Secrets: []metav1.PartialObjectMetadata{{ObjectMeta: om("app", "db-creds", nil)}},
 	}
 }
 
-func loadGraph(t *testing.T, ctx context.Context, db *sql.DB, snap *inventory.Snapshot) {
+func openDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if err := graph.ReplaceAssets(ctx, db, snap.Assets()); err != nil {
+	db, err := graph.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// loadScan stores snap as a new scan and returns its ID.
+func loadScan(t *testing.T, ctx context.Context, db *sql.DB, snap *inventory.Snapshot) int64 {
+	t.Helper()
+	scanID, err := graph.BeginScan(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.StoreAssets(ctx, db, scanID, snap.Assets()); err != nil {
 		t.Fatal(err)
 	}
 	edges := graph.BuildEdges(snap)
 	for _, cve := range []map[string]string{
 		{"cve_id": "CVE-1", "severity": "CRITICAL", "image": "web:1"},
-		{"cve_id": "CVE-1", "severity": "CRITICAL", "image": "sidecar:1"},
+		{"cve_id": "CVE-1", "severity": "HIGH", "image": "sidecar:1"}, // rated differently by another distro
 		{"cve_id": "CVE-2", "severity": "HIGH", "image": "web:1"},
 	} {
-		edges = append(edges, graph.Edge{SourceUID: "app/web", TargetUID: "app/web", EdgeType: graph.EdgeHasCVE, Properties: cve})
-		edges = append(edges, graph.Edge{SourceUID: "app/worker", TargetUID: "app/worker", EdgeType: graph.EdgeHasCVE, Properties: cve})
+		for _, pod := range snap.Pods {
+			if pod.Labels["app"] == "web" || pod.Name == "worker" {
+				uid := string(pod.UID)
+				edges = append(edges, graph.Edge{SourceUID: uid, TargetUID: uid, EdgeType: graph.EdgeHasCVE, Properties: cve})
+			}
+		}
 	}
-	if _, err := graph.StoreEdges(ctx, db, edges); err != nil {
+	if _, err := graph.StoreEdges(ctx, db, scanID, edges); err != nil {
 		t.Fatal(err)
 	}
+	return scanID
 }
 
 func TestDetectors(t *testing.T) {
-	dsn := os.Getenv("SHIELDOPS_TEST_DB")
-	if dsn == "" {
-		t.Skip("SHIELDOPS_TEST_DB not set")
-	}
+	t.Parallel()
 	ctx := context.Background()
-	db, err := graph.InitDB(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// Load twice: a repeated scan must not duplicate edges or findings.
-	loadGraph(t, ctx, db, scenario())
-	loadGraph(t, ctx, db, scenario())
+	db := openDB(t)
+	// Two scans of the same cluster: detectors must only see their own scan.
+	loadScan(t, ctx, db, scenario())
+	scanID := loadScan(t, ctx, db, scenario())
 
 	tests := []struct {
-		name       string
-		detect     func(context.Context, *sql.DB) ([]detectors.Finding, error)
+		detector   string
 		wantDescrs []string
 	}{
-		{"cluster-admin service account", detectors.DetectClusterAdminSA,
-			[]string{"Pod admin-pod in namespace app uses ServiceAccount admin-sa bound to cluster-admin"}},
-		{"secret in exposed pod", detectors.DetectExposedSecrets,
-			[]string{"Secret db-creds mounted in pod app/web exposed via web-np"}},
-		{"exposed pod with CVE", detectors.DetectExposedPodWithCVE,
-			[]string{"Pod app/web has 2 unique CVEs, top: [CVE-1(CRITICAL) CVE-2(HIGH)]"}},
+		{"cluster-admin-sa", []string{"Pod/admin-pod in namespace app uses ServiceAccount admin-sa bound to cluster-admin"}},
+		// Two replicas of one Deployment give one finding.
+		{"exposed-secret", []string{"Secret db-creds mounted in app/Deployment/web exposed via web-np"}},
+		{"exposed-cve", []string{"app/Deployment/web has 2 CVEs, top: [CVE-1(CRITICAL) CVE-2(HIGH)]"}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			findings, err := tt.detect(ctx, db)
+		t.Run(tt.detector, func(t *testing.T) {
+			i := slices.IndexFunc(detectors.All, func(d detectors.Detector) bool { return d.ID == tt.detector })
+			if i < 0 {
+				t.Fatalf("detector %s not registered", tt.detector)
+			}
+			findings, err := detectors.All[i].Detect(ctx, db, scanID)
 			if err != nil {
 				t.Fatalf("detect: %v", err)
 			}
 			var got []string
 			for _, f := range findings {
 				got = append(got, f.Description)
-			}
-			if len(got) != len(tt.wantDescrs) {
-				t.Fatalf("findings = %q, want %q", got, tt.wantDescrs)
-			}
-			for i := range got {
-				if got[i] != tt.wantDescrs[i] {
-					t.Errorf("finding[%d] = %q, want %q", i, got[i], tt.wantDescrs[i])
+				if f.Detector != tt.detector || len(f.Fingerprint) != 32 {
+					t.Errorf("finding %q: detector %q, fingerprint %q", f.Description, f.Detector, f.Fingerprint)
 				}
 			}
+			if !slices.Equal(got, tt.wantDescrs) {
+				t.Errorf("findings = %q, want %q", got, tt.wantDescrs)
+			}
 		})
+	}
+}
+
+func TestRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openDB(t)
+	all := []string{"cluster-admin-sa", "exposed-secret", "exposed-cve"}
+	noCVE := all[:2]
+
+	// run stores a scan, records its findings and finishes it.
+	run := func(snap *inventory.Snapshot, ok bool, complete []string) (detectors.Delta, []detectors.Finding) {
+		t.Helper()
+		scanID := loadScan(t, ctx, db, snap)
+		var findings []detectors.Finding
+		for _, d := range detectors.All {
+			f, err := d.Detect(ctx, db, scanID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(complete, d.ID) {
+				f = nil // e.g. trivy skipped: the detector sees no CVEs
+			}
+			findings = append(findings, f...)
+		}
+		delta, err := detectors.Record(ctx, db, scanID, findings, complete)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := graph.FinishScan(ctx, db, scanID, ok); err != nil {
+			t.Fatal(err)
+		}
+		return delta, findings
+	}
+	countNew := func(ff []detectors.Finding) int {
+		n := 0
+		for _, f := range ff {
+			if f.New {
+				n++
+			}
+		}
+		return n
+	}
+
+	full := scenario()
+	fixed := scenario()
+	fixed.Pods = slices.DeleteFunc(fixed.Pods, func(p corev1.Pod) bool { return p.Name == "admin-pod" })
+	// Pods restarted under new names: findings are keyed by workload, so nothing changes.
+	restarted := scenario()
+	restarted.Pods[2].Name, restarted.Pods[2].UID = "web-abc-9", "app/web-abc-9"
+
+	d, ff := run(full, true, all)
+	if d.Baseline || countNew(ff) != 0 {
+		t.Errorf("first scan: baseline %v, new %d; want no baseline, nothing new", d.Baseline, countNew(ff))
+	}
+
+	d, _ = run(restarted, true, all)
+	if !d.Baseline || d.New != 0 || len(d.Resolved) != 0 {
+		t.Errorf("restarted pods: %+v, want no changes", d)
+	}
+
+	d, _ = run(fixed, true, all)
+	if d.New != 0 || len(d.Resolved) != 1 || d.Resolved[0].Detector != "cluster-admin-sa" {
+		t.Errorf("fixed admin pod: %+v, want one resolved cluster-admin-sa", d)
+	}
+
+	// A failed scan is not a baseline: the next scan compares with "fixed".
+	run(full, false, all)
+	d, ff = run(full, true, all)
+	if d.New != 1 || countNew(ff) != 1 || len(d.Resolved) != 0 {
+		t.Errorf("admin pod back after failed scan: %+v, want one new", d)
+	}
+
+	// Without trivy CVE findings are neither resolved, nor new on the next full scan.
+	d, _ = run(full, true, noCVE)
+	if d.New != 0 || len(d.Resolved) != 0 {
+		t.Errorf("scan without trivy: %+v, want no changes", d)
+	}
+	d, _ = run(full, true, all)
+	if d.New != 0 || len(d.Resolved) != 0 {
+		t.Errorf("full scan after scan without trivy: %+v, want no changes", d)
 	}
 }

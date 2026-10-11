@@ -16,10 +16,6 @@ func meta(ns, name string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID(ns + "/" + name)}
 }
 
-func secretMeta(ns, name string) metav1.PartialObjectMetadata {
-	return metav1.PartialObjectMetadata{ObjectMeta: meta(ns, name)}
-}
-
 func nodePort(ns, name string, selector map[string]string) corev1.Service {
 	return corev1.Service{ObjectMeta: meta(ns, name), Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort, Selector: selector}}
 }
@@ -66,7 +62,7 @@ func TestBuildEdges(t *testing.T) {
 			},
 		},
 		{
-			name: "secrets from volume, projected, envFrom and env are deduplicated",
+			name: "secrets from volume, projected, envFrom and env are deduplicated, without listing Secrets",
 			snap: inventory.Snapshot{
 				Pods: []corev1.Pod{{
 					ObjectMeta: meta("a", "p"),
@@ -84,12 +80,12 @@ func TestBuildEdges(t *testing.T) {
 						}}},
 					},
 				}},
-				Secrets: []metav1.PartialObjectMetadata{secretMeta("a", "s1"), secretMeta("a", "s2"), secretMeta("a", "s3")},
 			},
 			want: []Edge{
-				{SourceUID: "a/p", TargetUID: "a/s1", EdgeType: EdgeMountsSecret},
-				{SourceUID: "a/p", TargetUID: "a/s2", EdgeType: EdgeMountsSecret},
-				{SourceUID: "a/p", TargetUID: "a/s3", EdgeType: EdgeMountsSecret},
+				{SourceUID: "a/p", TargetUID: "secret:a/missing", EdgeType: EdgeMountsSecret},
+				{SourceUID: "a/p", TargetUID: "secret:a/s1", EdgeType: EdgeMountsSecret},
+				{SourceUID: "a/p", TargetUID: "secret:a/s2", EdgeType: EdgeMountsSecret},
+				{SourceUID: "a/p", TargetUID: "secret:a/s3", EdgeType: EdgeMountsSecret},
 			},
 		},
 		{

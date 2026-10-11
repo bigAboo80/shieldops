@@ -1,7 +1,8 @@
 # Deliberately vulnerable objects. Expected scan result for this namespace:
-#   1x Critical  Pod Running with Cluster-Admin ServiceAccount  (admin-pod)
-#   1x High      Secret Mounted in Internet-Exposed Pod         (web / e2e-db-creds)
-#   1x Critical  Internet-Exposed Pod with Known CVE             (web, nginx:1.16)
+#   1x Critical  Workload Running with Cluster-Admin ServiceAccount  (Pod/admin-pod)
+#   1x High      Secret Mounted in Internet-Exposed Workload         (Deployment/web, e2e-db-creds)
+#   1x Critical  Internet-Exposed Workload with Known CVE             (Deployment/web, nginx:1.16)
+# Deployment/web has 2 replicas: findings are per workload, not per pod.
 # Clean up: kubectl delete -f test/e2e/fixtures.yaml
 apiVersion: v1
 kind: Namespace
@@ -46,25 +47,32 @@ metadata:
 stringData:
   password: not-a-real-password
 ---
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: web
   namespace: shieldops-e2e
-  labels:
-    app: e2e-web
 spec:
-  containers:
-    - name: nginx
-      image: nginx:1.16
-      volumeMounts:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: e2e-web
+  template:
+    metadata:
+      labels:
+        app: e2e-web
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.16
+          volumeMounts:
+            - name: creds
+              mountPath: /etc/creds
+              readOnly: true
+      volumes:
         - name: creds
-          mountPath: /etc/creds
-          readOnly: true
-  volumes:
-    - name: creds
-      secret:
-        secretName: e2e-db-creds
+          secret:
+            secretName: e2e-db-creds
 ---
 apiVersion: v1
 kind: Service

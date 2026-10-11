@@ -1,26 +1,45 @@
+-- Every scan keeps its own snapshot of the graph, so scans can be compared.
+CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running', -- running | done | failed
+    -- detectors whose results are complete, e.g. exposed-cve is not when trivy was skipped
+    complete_detectors TEXT NOT NULL DEFAULT '[]' -- JSON array
+);
+
 CREATE TABLE IF NOT EXISTS assets (
-    id SERIAL PRIMARY KEY,
+    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    uid TEXT NOT NULL,
     kind TEXT NOT NULL,
     name TEXT NOT NULL,
-    namespace TEXT,
-    labels JSONB,
-    images TEXT[] NOT NULL DEFAULT '{}',
-    uid TEXT UNIQUE NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
+    namespace TEXT NOT NULL DEFAULT '',
+    workload TEXT NOT NULL DEFAULT '',
+    labels TEXT NOT NULL DEFAULT '{}', -- JSON object
+    images TEXT NOT NULL DEFAULT '[]', -- JSON array
+    PRIMARY KEY (scan_id, uid)
 );
-
-ALTER TABLE assets ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS edges (
-    id SERIAL PRIMARY KEY,
-    source_uid TEXT REFERENCES assets(uid) ON DELETE CASCADE,
-    target_uid TEXT REFERENCES assets(uid) ON DELETE CASCADE,
+    scan_id INTEGER NOT NULL,
+    source_uid TEXT NOT NULL,
+    target_uid TEXT NOT NULL,
     edge_type TEXT NOT NULL,
-    properties JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE (source_uid, target_uid, edge_type, properties)
+    properties TEXT NOT NULL DEFAULT '{}', -- JSON object with sorted keys
+    PRIMARY KEY (scan_id, source_uid, target_uid, edge_type, properties),
+    FOREIGN KEY (scan_id, source_uid) REFERENCES assets(scan_id, uid) ON DELETE CASCADE,
+    FOREIGN KEY (scan_id, target_uid) REFERENCES assets(scan_id, uid) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_edges_source_uid ON edges(source_uid);
-CREATE INDEX IF NOT EXISTS idx_edges_target_uid ON edges(target_uid);
-CREATE INDEX IF NOT EXISTS idx_edges_edge_type ON edges(edge_type);
+CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(scan_id, edge_type);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(scan_id, target_uid);
+
+CREATE TABLE IF NOT EXISTS findings (
+    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    detector TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    PRIMARY KEY (scan_id, fingerprint)
+);

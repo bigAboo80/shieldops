@@ -5,14 +5,11 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/bigAboo80/shieldops/internal/connector"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	metafake "k8s.io/client-go/metadata/fake"
 )
 
 func TestCollect(t *testing.T) {
@@ -20,38 +17,30 @@ func TestCollect(t *testing.T) {
 	om := func(ns, name string) metav1.ObjectMeta {
 		return metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID("uid-" + name)}
 	}
-	secret := func(ns, name string) *metav1.PartialObjectMetadata {
-		return &metav1.PartialObjectMetadata{
-			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
-			ObjectMeta: om(ns, name),
-		}
-	}
+	secretVol := corev1.Volume{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "sec-a"}}}
 	kube := kubefake.NewSimpleClientset(
-		&corev1.Pod{ObjectMeta: om("a", "pod-a"), Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: "nginx:1"}}}},
+		&corev1.Pod{ObjectMeta: om("a", "pod-a"), Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: "nginx:1"}}, Volumes: []corev1.Volume{secretVol}}},
+		&corev1.Pod{ObjectMeta: om("a", "pod-a2"), Spec: corev1.PodSpec{Volumes: []corev1.Volume{secretVol}}},
 		&corev1.Pod{ObjectMeta: om("b", "pod-b")},
 		&corev1.ServiceAccount{ObjectMeta: om("a", "sa-a")},
 		&corev1.Service{ObjectMeta: om("a", "svc-a")},
 		&rbacv1.ClusterRoleBinding{ObjectMeta: om("", "crb")},
+		// Never listed: the scanner has no RBAC for Secrets.
+		&corev1.Secret{ObjectMeta: om("b", "unreferenced")},
 	)
-	scheme := metafake.NewTestScheme()
-	if err := metav1.AddMetaToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	md := metafake.NewSimpleMetadataClient(scheme, []runtime.Object{secret("a", "sec-a"), secret("b", "sec-b")}...)
-	cl := &connector.Clients{Kube: kube, Metadata: md}
 
 	tests := []struct {
 		name string
 		ns   string
 		want []string
 	}{
-		{"all namespaces", "", []string{"ClusterRoleBinding/crb", "Pod/pod-a", "Pod/pod-b", "Secret/sec-a", "Secret/sec-b", "Service/svc-a", "ServiceAccount/sa-a"}},
-		{"single namespace keeps cluster scoped bindings", "a", []string{"ClusterRoleBinding/crb", "Pod/pod-a", "Secret/sec-a", "Service/svc-a", "ServiceAccount/sa-a"}},
+		{"all namespaces", "", []string{"ClusterRoleBinding/crb", "Pod/pod-a", "Pod/pod-a2", "Pod/pod-b", "Secret/sec-a", "Service/svc-a", "ServiceAccount/sa-a"}},
+		{"single namespace keeps cluster scoped bindings", "a", []string{"ClusterRoleBinding/crb", "Pod/pod-a", "Pod/pod-a2", "Secret/sec-a", "Service/svc-a", "ServiceAccount/sa-a"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			snap, err := Collect(context.Background(), cl, tt.ns)
+			snap, err := Collect(context.Background(), kube, tt.ns)
 			if err != nil {
 				t.Fatalf("Collect() error = %v", err)
 			}
@@ -62,6 +51,34 @@ func TestCollect(t *testing.T) {
 			slices.Sort(got)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("assets = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkload(t *testing.T) {
+	t.Parallel()
+	ctrl := true
+	owned := func(kind, name string, lbl map[string]string) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p-123", Labels: lbl,
+			OwnerReferences: []metav1.OwnerReference{{Kind: kind, Name: name, Controller: &ctrl}}}}
+	}
+	tests := []struct {
+		name string
+		pod  corev1.Pod
+		want string
+	}{
+		{"bare pod", corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}}, "Pod/p"},
+		{"deployment via replicaset", owned("ReplicaSet", "web-5d9c7b", map[string]string{"pod-template-hash": "5d9c7b"}), "Deployment/web"},
+		{"bare replicaset", owned("ReplicaSet", "rs", nil), "ReplicaSet/rs"},
+		{"statefulset", owned("StatefulSet", "db", nil), "StatefulSet/db"},
+		{"static pod owned by node", owned("Node", "cp1", nil), "Pod/p-123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Workload(tt.pod); got != tt.want {
+				t.Errorf("Workload() = %q, want %q", got, tt.want)
 			}
 		})
 	}
