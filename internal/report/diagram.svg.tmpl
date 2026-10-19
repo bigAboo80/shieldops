@@ -1,0 +1,13 @@
+<svg class="pathsvg" viewBox="0 0 {{.W}} {{.H}}" width="{{.W}}" height="{{.H}}" role="img" aria-label="{{.Aria}}" xmlns="http://www.w3.org/2000/svg">
+{{- range .Edges}}
+<g class="pe"><line x1="24" y1="{{.Y1}}" x2="24" y2="{{.Y2}}"/><polygon points="{{.Arrow}}"/>{{if .Label}}<text x="36" y="{{.LabelY}}">{{.Label}}</text>{{end}}</g>
+{{- end}}
+{{- range .Nodes}}
+<g class="pn pn-{{.Kind}}{{if .First}} pn-first{{end}}{{if .Last}} pn-last{{end}}"><title>{{.Full}}</title>
+<rect x="1" y="{{.Y}}" width="358" height="52" rx="8"/>
+<path class="pn-i" transform="translate(16 {{.IconY}})" d="{{.Icon}}"/>
+{{- if .Name}}<text class="pn-k" x="{{.TextX}}" y="{{.Y}}" dy="21">{{.Caption}}</text><text class="pn-n" x="{{.TextX}}" y="{{.Y}}" dy="39">{{.Name}}</text>
+{{- else}}<text class="pn-n" x="{{.TextX}}" y="{{.Y}}" dy="31">{{.Caption}}</text>{{end}}
+</g>
+{{- end}}
+</svg>

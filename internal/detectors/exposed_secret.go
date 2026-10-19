@@ -36,21 +36,18 @@ func DetectExposedSecrets(ctx context.Context, db *sql.DB, scanID int64) ([]Find
 		}
 
 		findings = append(findings, Finding{
-			Detector:    "exposed-secret",
-			Fingerprint: fingerprint("exposed-secret", namespace, workload, secretName, serviceName),
-			FSTEKControls: []FSTEKControl{
-				{"ZI.1", "User identification and authentication", "K1/K2/K3"},
-				{"ZI.2", "Identifier management", "K1/K2/K3"},
-				{"ZI.3", "Authentication data management", "K2/K3"},
-				{"ZTS.3", "Information protection during transfer", "K1/K2/K3"},
-				{"UPD.3", "Access control to protected objects", "K1/K2/K3"},
-			},
-			Recommendation: "Remove Secret mount from internet-exposed pod or apply NetworkPolicy.",
+			Targets:        []Target{workloadTarget(namespace, workload), {Kind: "Secret", Namespace: namespace, Name: secretName}},
+			Namespace:      namespace,
+			Detector:       "exposed-secret",
+			Fingerprint:    fingerprint("exposed-secret", namespace, workload, secretName, serviceName),
+			FSTEKControls:  []string{"ИАФ.1", "ИАФ.3", "ИАФ.4", "ЗИС.3", "УПД.3"},
+			FSTEK117:       []string{"ЗКО.3", "УПД.2", "ЗКС.1"},
+			Recommendation: en("exposed-secret.rec"),
 			Severity:       "High",
-			Title:          "Secret Mounted in Internet-Exposed Workload",
-			Description:    fmt.Sprintf("Secret %s mounted in %s/%s exposed via %s", secretName, namespace, workload, serviceName),
-			AttackPath:     []string{"Internet", fmt.Sprintf("Service: %s", serviceName), fmt.Sprintf("%s/%s", namespace, workload), fmt.Sprintf("Secret: %s", secretName)},
-			Remediation:    "Move secret to external vault or remove internet exposure",
+			Title:          en("exposed-secret.title"),
+			Description:    en("exposed-secret.desc", secretName, namespace, workload, serviceName),
+			AttackPath:     []string{en("path.internet"), fmt.Sprintf("Service: %s", serviceName), fmt.Sprintf("%s/%s", namespace, workload), fmt.Sprintf("Secret: %s", secretName)},
+			Remediation:    en("exposed-secret.fix"),
 		})
 	}
 

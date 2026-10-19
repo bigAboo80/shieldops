@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os/exec"
 	"slices"
+	"strings"
 
 	"github.com/bigAboo80/shieldops/internal/graph"
 )
@@ -16,15 +17,17 @@ import (
 type trivyResult struct {
 	Results []struct {
 		Vulnerabilities []struct {
-			VulnerabilityID string `json:"VulnerabilityID"`
-			Severity        string `json:"Severity"`
-			PkgName         string `json:"PkgName"`
-			Title           string `json:"Title"`
+			VulnerabilityID  string `json:"VulnerabilityID"`
+			Severity         string `json:"Severity"`
+			PkgName          string `json:"PkgName"`
+			InstalledVersion string `json:"InstalledVersion"`
+			FixedVersion     string `json:"FixedVersion"` // empty: no fix yet
+			Title            string `json:"Title"`
 		} `json:"Vulnerabilities"`
 	} `json:"Results"`
 }
 
-type vuln struct{ id, severity, pkg, title string }
+type vuln struct{ id, severity, pkg, installed, fixed, title string }
 
 // Runner describes how to invoke trivy. Command may wrap trivy, e.g.
 // "ssh scanner-host trivy", so images are pulled where bandwidth is cheap.
@@ -55,7 +58,7 @@ func ScanImages(ctx context.Context, r Runner, byImage map[string][]string) ([]g
 			return edges, fmt.Errorf("scan %s: %w", image, err)
 		}
 		if err != nil {
-			fmt.Printf("    [trivy] skip %s: %v\n", image, err)
+			fmt.Printf("    [trivy] skip %s: %s\n", image, brief(err))
 			continue
 		}
 		for _, uid := range byImage[image] {
@@ -64,6 +67,7 @@ func ScanImages(ctx context.Context, r Runner, byImage map[string][]string) ([]g
 					SourceUID: uid, TargetUID: uid, EdgeType: graph.EdgeHasCVE,
 					Properties: map[string]string{
 						"cve_id": v.id, "severity": v.severity, "package": v.pkg, "title": v.title, "image": image,
+						"installed": v.installed, "fixed": v.fixed,
 					},
 				})
 			}
@@ -123,8 +127,26 @@ func parseResult(out []byte) ([]vuln, error) {
 				continue
 			}
 			seen[v.VulnerabilityID] = true
-			vulns = append(vulns, vuln{v.VulnerabilityID, v.Severity, v.PkgName, v.Title})
+			vulns = append(vulns, vuln{v.VulnerabilityID, v.Severity, v.PkgName, v.InstalledVersion, v.FixedVersion, v.Title})
 		}
 	}
 	return vulns, nil
+}
+
+// brief is the reason an image was skipped in one line: trivy's own error
+// is a wall of text, one per tried image source.
+func brief(err error) string {
+	msg := err.Error()
+	for _, private := range []string{"DENIED", "UNAUTHORIZED", "authentication required", "unable to find the specified image"} {
+		if strings.Contains(msg, private) {
+			return "no access to the image in its registry (a private registry needs credentials for trivy)"
+		}
+	}
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	return msg
 }

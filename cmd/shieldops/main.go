@@ -14,15 +14,21 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // the distroless image has no zone database
 
 	"github.com/bigAboo80/shieldops/internal/connector"
 	"github.com/bigAboo80/shieldops/internal/detectors"
 	"github.com/bigAboo80/shieldops/internal/graph"
 	"github.com/bigAboo80/shieldops/internal/inventory"
+	"github.com/bigAboo80/shieldops/internal/paths"
 	"github.com/bigAboo80/shieldops/internal/report"
+	"github.com/bigAboo80/shieldops/internal/signing"
 	"github.com/bigAboo80/shieldops/pkg/trivy"
 	"k8s.io/client-go/kubernetes"
 )
+
+// version of ShieldOps, shown in the CLI and the report.
+const version = "0.3"
 
 type command struct {
 	summary string
@@ -71,23 +77,42 @@ func main() {
 
 type scanConfig struct {
 	kubeconfig, kubeContext, namespace, db string
+	excludeNamespaces, platformNamespaces  string
 	trivyCmd, trivyCache                   string
 	skipTrivy                              bool
 	trivyTimeout                           time.Duration
 	keepScans                              int
+	clusterName, signKeyFile               string
 }
 
 func (c *scanConfig) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.kubeconfig, "kubeconfig", defaultKubeconfig(), "path to kubeconfig (empty = in-cluster ServiceAccount)")
 	fs.StringVar(&c.kubeContext, "context", "", "kubeconfig context (empty = current)")
 	fs.StringVar(&c.namespace, "namespace", "", "namespace to scan (empty = all)")
+	fs.StringVar(&c.excludeNamespaces, "exclude-namespaces", "", "comma-separated namespaces to skip (empty = none)")
+	fs.StringVar(&c.platformNamespaces, "platform-namespaces", "", "comma-separated namespaces of cluster components, added to the defaults; \"-\" drops the defaults")
 	fs.StringVar(&c.db, "db", envOr("SHIELDOPS_DB", "shieldops.db"), "SQLite database path (default $SHIELDOPS_DB)")
 	fs.StringVar(&c.trivyCmd, "trivy-cmd", "trivy", `trivy command, may be wrapped, e.g. "ssh scan-host trivy"`)
 	fs.StringVar(&c.trivyCache, "trivy-cache", "", "trivy cache directory (empty = trivy default)")
 	fs.BoolVar(&c.skipTrivy, "skip-trivy", false, "skip image CVE scanning")
 	fs.DurationVar(&c.trivyTimeout, "trivy-timeout", 20*time.Minute, "time budget for DB update and image scanning")
 	fs.IntVar(&c.keepScans, "keep-scans", 100, "number of scans kept in the database")
+	fs.StringVar(&c.clusterName, "cluster-name", "", "name of the cluster in reports (empty = not shown)")
+	fs.StringVar(&c.signKeyFile, "sign-key-file", "", "Ed25519 key from shieldops keygen: reports get a .sig file next to them")
 }
+
+// signer loads -sign-key-file; nil when reports are not signed.
+func (c scanConfig) signer() (*signing.Signer, error) {
+	if c.signKeyFile == "" {
+		return nil, nil
+	}
+	return signing.LoadSigner(c.signKeyFile)
+}
+
+// scanOutputs add report files to scan: each registers its flags and
+// returns the writer, which does nothing when its flag is not set. Files of
+// other editions add theirs in init.
+var scanOutputs []func(fs *flag.FlagSet) func(d report.Data, signer *signing.Signer) error
 
 // defaultKubeconfig follows kubectl, and falls back to in-cluster mode when
 // no kubeconfig exists (e.g. inside a pod).
@@ -106,6 +131,26 @@ func defaultKubeconfig() string {
 	return p
 }
 
+// ownNamespace is the namespace ShieldOps runs in, empty outside a cluster.
+func ownNamespace() string {
+	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// csvList parses a comma-separated list, dropping blanks.
+func csvList(s string) []string {
+	var res []string
+	for v := range strings.SplitSeq(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			res = append(res, v)
+		}
+	}
+	return res
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -118,7 +163,25 @@ func runScanCmd(ctx context.Context, args []string) error {
 	var cfg scanConfig
 	cfg.register(fs)
 	output := fs.String("output", "", "path to HTML report (e.g. report.html)")
+	lang := fs.String("lang", "ru", "language of the report: ru or en")
+	timezone := fs.String("timezone", "Europe/Moscow", "time zone of the report, e.g. Europe/Moscow or UTC")
+	fstek := fs.String("fstek", "", "FSTEK order of the measures table: 117 or 17 (empty = no table)")
+	var outputs []func(report.Data, *signing.Signer) error
+	for _, o := range scanOutputs {
+		outputs = append(outputs, o(fs))
+	}
 	fs.Parse(args)
+	signer, err := cfg.signer()
+	if err != nil {
+		return err
+	}
+	loc, err := reportLocale(*lang, *timezone)
+	if err != nil {
+		return err
+	}
+	if err := checkFSTEK(*fstek, true); err != nil {
+		return err
+	}
 
 	kube, db, err := connect(ctx, cfg)
 	if err != nil {
@@ -128,11 +191,22 @@ func runScanCmd(ctx context.Context, args []string) error {
 
 	res, err := scan(ctx, cfg, kube, db)
 	data := res.Data
-	if *output != "" && len(data.Findings)+data.Assets > 0 {
-		if werr := writeReport(*output, data); werr != nil {
-			return werr
+	data.Lang, data.Location, data.FSTEK, data.Cluster = *lang, loc, *fstek, cfg.clusterName
+	if len(data.Findings)+data.Assets > 0 {
+		if *output != "" {
+			if werr := writeReport(*output, data, signer); werr != nil {
+				return werr
+			}
+			fmt.Printf("[✓] HTML report saved: %s\n", *output)
+			if signer != nil {
+				fmt.Printf("[✓] Signed: %s.sig, key %s\n", *output, signer.Fingerprint())
+			}
 		}
-		fmt.Printf("[✓] HTML report saved: %s\n", *output)
+		for _, write := range outputs {
+			if werr := write(data, signer); werr != nil {
+				return werr
+			}
+		}
 	}
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	if err != nil {
@@ -142,9 +216,33 @@ func runScanCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
+// reportLocale checks -lang and -timezone of the report.
+func reportLocale(lang, timezone string) (*time.Location, error) {
+	if !slices.Contains(report.Langs, lang) {
+		return nil, fmt.Errorf("-lang %q: want ru or en", lang)
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil || timezone == "" {
+		return nil, fmt.Errorf("-timezone %q: want a zone name such as Europe/Moscow or UTC", timezone)
+	}
+	return loc, nil
+}
+
+// checkFSTEK checks -fstek: the order the report maps findings to; empty
+// means no measures table where allowEmpty.
+func checkFSTEK(order string, allowEmpty bool) error {
+	if order == "" && allowEmpty {
+		return nil
+	}
+	if _, ok := detectors.OrderByID(order); !ok {
+		return fmt.Errorf("-fstek %q: want 117 or 17", order)
+	}
+	return nil
+}
+
 // connect opens the cluster and the database; schemas are passed to graph.Open.
 func connect(ctx context.Context, cfg scanConfig, schemas ...string) (*kubernetes.Clientset, *sql.DB, error) {
-	fmt.Println("ShieldOps Scanner v0.2")
+	fmt.Printf("ShieldOps Scanner v%s\n", version)
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	kube, err := connector.NewClient(cfg.kubeconfig, cfg.kubeContext)
 	if err != nil {
@@ -175,7 +273,7 @@ type scanResult struct {
 // found so far; such a scan is marked failed and never used as a baseline.
 func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sql.DB) (res scanResult, err error) {
 	data := &res.Data
-	data.Generated = time.Now()
+	data.Generated, data.Version = time.Now(), version
 	scanID, err := graph.BeginScan(ctx, db)
 	if err != nil {
 		return res, err
@@ -191,7 +289,7 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 	apiCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	fmt.Printf("\n[*] Scan #%d: collecting assets...\n", scanID)
-	snap, err := inventory.Collect(apiCtx, kube, cfg.namespace)
+	snap, err := inventory.Collect(apiCtx, kube, cfg.namespace, csvList(cfg.excludeNamespaces))
 	if err != nil {
 		return res, fmt.Errorf("inventory: %w", err)
 	}
@@ -202,7 +300,7 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 	}
 	fmt.Printf("[✓] Discovered %d assets\n", len(assets))
 
-	edges := graph.BuildEdges(snap)
+	edges := append(graph.BuildEdges(snap), graph.AttackEdges(snap)...)
 	var trivyErr error
 	if !cfg.skipTrivy {
 		fmt.Println("[*] Scanning images with Trivy...")
@@ -215,11 +313,19 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 			fmt.Fprintf(os.Stderr, "%v\n", trivyErr)
 		}
 		edges = append(edges, cveEdges...)
+		edges = append(edges, graph.LateralEdges(snap, cveEdges)...)
 	}
 	if data.Edges, err = graph.StoreEdges(ctx, db, scanID, edges); err != nil {
 		return res, fmt.Errorf("store edges: %w", err)
 	}
 	fmt.Printf("[✓] Built graph with %d edges\n", data.Edges)
+	g, err := paths.Load(ctx, db, scanID)
+	if err != nil {
+		return res, fmt.Errorf("load attack graph: %w", err)
+	}
+	if err := paths.StoreBlastRadius(ctx, db, scanID, g.BlastRadius()); err != nil {
+		return res, err
+	}
 
 	var detectErrs []error
 	var complete []string
@@ -235,6 +341,9 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 		}
 		complete = append(complete, d.ID)
 	}
+	if err := detectors.MarkPlatform(ctx, db, scanID, data.Findings, detectors.PlatformNamespaces(cfg.platformNamespaces, ownNamespace())); err != nil {
+		return res, err
+	}
 	if data.Delta, err = detectors.Record(ctx, db, scanID, data.Findings, complete); err != nil {
 		return res, err
 	}
@@ -244,19 +353,37 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 }
 
 func printFindings(d report.Data) {
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	if len(d.Findings) == 0 {
-		fmt.Println("[✓] No critical findings detected")
-	} else {
-		fmt.Printf("[!] %d findings:\n\n", len(d.Findings))
+	var apps, platform []detectors.Finding
+	for _, f := range d.Findings {
+		if f.Platform {
+			platform = append(platform, f)
+		} else {
+			apps = append(apps, f)
+		}
 	}
-	for i, f := range d.Findings {
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	if len(apps) == 0 {
+		fmt.Println("[✓] No findings in applications")
+	} else {
+		fmt.Printf("[!] %d findings in applications:\n\n", len(apps))
+	}
+	for i, f := range apps {
 		mark := ""
 		if f.New {
 			mark = " [NEW]"
 		}
+		if f.Score > 0 {
+			mark += fmt.Sprintf(" [risk %d]", f.Score)
+		}
 		fmt.Printf("[%d] %s%s — %s\n    %s\n    Path: %s\n    Fix: %s\n\n",
 			i+1, f.Severity, mark, f.Title, f.Description, strings.Join(f.AttackPath, " → "), f.Remediation)
+	}
+	if len(platform) > 0 {
+		fmt.Printf("Cluster platform (Kubernetes and infrastructure components, usually set up by the cluster's provider): %d findings\n", len(platform))
+		for _, f := range platform {
+			fmt.Printf("    %s — %s: %s\n", f.Severity, f.Title, f.Description)
+		}
+		fmt.Println()
 	}
 	if d.Baseline {
 		fmt.Printf("Since previous scan: %d new, %d resolved\n", d.New, len(d.Resolved))
@@ -266,8 +393,12 @@ func printFindings(d report.Data) {
 	}
 }
 
-// writeReport replaces the report atomically, readable by the owner only.
-func writeReport(path string, d report.Data) error {
+// writeReport replaces the report atomically, readable by the owner only,
+// and signs it when signer is set.
+func writeReport(path string, d report.Data, signer *signing.Signer) error {
+	if signer != nil {
+		d.SignKey = signer.Fingerprint()
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".report-*.html")
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
@@ -282,6 +413,9 @@ func writeReport(path string, d report.Data) error {
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("save report: %w", err)
+	}
+	if signer != nil {
+		return signer.SignFile(path, time.Now())
 	}
 	return nil
 }
