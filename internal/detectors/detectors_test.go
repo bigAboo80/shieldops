@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/bigAboo80/shieldops/internal/detectors"
@@ -76,11 +77,11 @@ func loadScan(t *testing.T, ctx context.Context, db *sql.DB, snap *inventory.Sna
 	if err := graph.StoreAssets(ctx, db, scanID, snap.Assets()); err != nil {
 		t.Fatal(err)
 	}
-	edges := graph.BuildEdges(snap)
+	edges := append(graph.BuildEdges(snap), graph.AttackEdges(snap)...)
 	for _, cve := range []map[string]string{
-		{"cve_id": "CVE-1", "severity": "CRITICAL", "image": "web:1"},
-		{"cve_id": "CVE-1", "severity": "HIGH", "image": "sidecar:1"}, // rated differently by another distro
-		{"cve_id": "CVE-2", "severity": "HIGH", "image": "web:1"},
+		{"cve_id": "CVE-1", "severity": "CRITICAL", "image": "web:1", "package": "openssl", "installed": "3.0.13", "fixed": "3.0.15"},
+		{"cve_id": "CVE-1", "severity": "HIGH", "image": "sidecar:1", "package": "openssl", "installed": "3.0.13", "fixed": "3.0.15"}, // rated differently by another distro
+		{"cve_id": "CVE-2", "severity": "HIGH", "image": "web:1", "package": "libx", "installed": "1.2", "fixed": ""},
 	} {
 		for _, pod := range snap.Pods {
 			if pod.Labels["app"] == "web" || pod.Name == "worker" {
@@ -110,7 +111,7 @@ func TestDetectors(t *testing.T) {
 		{"cluster-admin-sa", []string{"Pod/admin-pod in namespace app uses ServiceAccount admin-sa bound to cluster-admin"}},
 		// Two replicas of one Deployment give one finding.
 		{"exposed-secret", []string{"Secret db-creds mounted in app/Deployment/web exposed via web-np"}},
-		{"exposed-cve", []string{"app/Deployment/web has 2 CVEs, top: [CVE-1(CRITICAL) CVE-2(HIGH)]"}},
+		{"exposed-cve", []string{"app/Deployment/web has 2 CVEs, top: [CVE-1(CRITICAL) CVE-2(HIGH)]; fixed in openssl 3.0.15"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.detector, func(t *testing.T) {
@@ -127,6 +128,12 @@ func TestDetectors(t *testing.T) {
 				got = append(got, f.Description)
 				if f.Detector != tt.detector || len(f.Fingerprint) != 32 {
 					t.Errorf("finding %q: detector %q, fingerprint %q", f.Description, f.Detector, f.Fingerprint)
+				}
+			}
+			if tt.detector == "exposed-cve" {
+				want := []detectors.Fix{{Package: "libx", Installed: "1.2"}, {Package: "openssl", Installed: "3.0.13", Fixed: "3.0.15"}}
+				if fixes := findings[0].Fixes; !slices.EqualFunc(slices.SortedFunc(slices.Values(fixes), func(a, b detectors.Fix) int { return strings.Compare(a.Package, b.Package) }), want, func(a, b detectors.Fix) bool { return a == b }) {
+					t.Errorf("fixes = %+v, want %+v", fixes, want)
 				}
 			}
 			if !slices.Equal(got, tt.wantDescrs) {

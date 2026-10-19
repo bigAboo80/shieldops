@@ -4,3 +4,4 @@
 !cmd/
 !internal/
 !pkg/
+!bin/shieldops

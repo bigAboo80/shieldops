@@ -118,6 +118,14 @@ func StoreAssets(ctx context.Context, db *sql.DB, scanID int64, assets []invento
 		if err != nil {
 			return fmt.Errorf("insert asset %s %s/%s: %w", a.Kind, a.Namespace, a.Name, err)
 		}
+		for _, f := range a.Facts {
+			_, err = tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO asset_facts (scan_id, uid, kind, value) VALUES (?, ?, ?, ?)
+			`, scanID, a.UID, f.Kind, f.Value)
+			if err != nil {
+				return fmt.Errorf("insert fact %s of %s %s/%s: %w", f.Kind, a.Kind, a.Namespace, a.Name, err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit assets: %w", err)

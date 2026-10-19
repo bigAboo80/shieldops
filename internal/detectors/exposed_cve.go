@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB, scanID int64) ([]Finding, error) {
@@ -13,7 +15,10 @@ func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB, scanID int64) ([]F
 			pods.namespace,
 			pods.workload,
 			json_extract(e_cve.properties, '$.cve_id') AS cve_id,
-			json_extract(e_cve.properties, '$.severity') AS severity
+			json_extract(e_cve.properties, '$.severity') AS severity,
+			COALESCE(json_extract(e_cve.properties, '$.package'), ''),
+			COALESCE(json_extract(e_cve.properties, '$.installed'), ''),
+			COALESCE(json_extract(e_cve.properties, '$.fixed'), '')
 		FROM assets pods
 		JOIN edges e_cve ON e_cve.scan_id = pods.scan_id AND e_cve.source_uid = pods.uid AND e_cve.edge_type = 'HAS_CVE'
 		WHERE pods.scan_id = ? AND pods.kind = 'Pod'
@@ -33,15 +38,25 @@ func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB, scanID int64) ([]F
 	var order []workload
 	cves := map[workload][]string{}
 	seen := map[workload]map[string]bool{}
+	fixes := map[workload][]Fix{}
+	fixedIn := map[workload]map[string]string{} // CVE: "package version" fixing it
 	for rows.Next() {
 		var w workload
 		var cveID, severity string
-		if err := rows.Scan(&w.namespace, &w.name, &cveID, &severity); err != nil {
+		var fix Fix
+		if err := rows.Scan(&w.namespace, &w.name, &cveID, &severity, &fix.Package, &fix.Installed, &fix.Fixed); err != nil {
 			return nil, fmt.Errorf("scan exposed CVE row: %w", err)
 		}
 		if seen[w] == nil {
 			order = append(order, w)
 			seen[w] = map[string]bool{}
+			fixedIn[w] = map[string]string{}
+		}
+		if fix.Package != "" && !slices.Contains(fixes[w], fix) {
+			fixes[w] = append(fixes[w], fix)
+		}
+		if fix.Fixed != "" && fixedIn[w][cveID] == "" {
+			fixedIn[w][cveID] = fix.Package + " " + fix.Fixed
 		}
 		// Distros may rate one CVE differently; rows come most severe first, keep that one.
 		if !seen[w][cveID] {
@@ -57,27 +72,36 @@ func DetectExposedPodWithCVE(ctx context.Context, db *sql.DB, scanID int64) ([]F
 	for _, w := range order {
 		all := cves[w]
 		top := all[:min(3, len(all))]
+		desc := en("exposed-cve.desc", w.namespace, w.name, len(all), fmt.Sprint(top))
+		var versions []string
+		for _, c := range top {
+			id, _, _ := strings.Cut(c, "(")
+			if v := fixedIn[w][id]; v != "" && !slices.Contains(versions, v) {
+				versions = append(versions, v)
+			}
+		}
+		if len(versions) > 0 {
+			desc = en("exposed-cve.descfix", w.namespace, w.name, len(all), fmt.Sprint(top), strings.Join(versions, ", "))
+		}
 		findings = append(findings, Finding{
-			Detector: "exposed-cve",
+			Fixes:     fixes[w],
+			Targets:   []Target{workloadTarget(w.namespace, w.name)},
+			Namespace: w.namespace,
+			Detector:  "exposed-cve",
 			// Keyed by workload only: a new CVE changes the details, not the problem.
-			Fingerprint: fingerprint("exposed-cve", w.namespace, w.name),
-			FSTEKControls: []FSTEKControl{
-				{"ANZ.1", "Vulnerability detection and analysis", "K1/K2/K3"},
-				{"ANZ.2", "Update installation control", "K2/K3"},
-				{"ANZ.3", "Software operability control", "K2/K3"},
-				{"ZSV.2", "Software installation control", "K2/K3"},
-				{"ZTS.1", "Security management function separation", "K1/K2/K3"},
-			},
-			Recommendation: "Update container image to version with patched CVE. Apply NetworkPolicy.",
+			Fingerprint:    fingerprint("exposed-cve", w.namespace, w.name),
+			FSTEKControls:  []string{"АНЗ.1", "АНЗ.2", "АНЗ.3", "ОПС.2", "ЗИС.1"},
+			FSTEK117:       []string{"ЗКО.8", "ЗКС.1"},
+			Recommendation: en("exposed-cve.rec"),
 			Severity:       "Critical",
-			Title:          "Internet-Exposed Workload with Known CVE",
-			Description:    fmt.Sprintf("%s/%s has %d CVEs, top: %v", w.namespace, w.name, len(all), top),
+			Title:          en("exposed-cve.title"),
+			Description:    desc,
 			AttackPath: []string{
-				"Internet",
+				en("path.internet"),
 				fmt.Sprintf("%s/%s", w.namespace, w.name),
-				fmt.Sprintf("%d CVEs (CRITICAL/HIGH)", len(all)),
+				en("path.cves", len(all)),
 			},
-			Remediation: "Patch the vulnerability or remove internet exposure",
+			Remediation: en("exposed-cve.fix"),
 		})
 	}
 	return findings, nil

@@ -20,6 +20,18 @@ CREATE TABLE IF NOT EXISTS assets (
     PRIMARY KEY (scan_id, uid)
 );
 
+-- Security-relevant properties of an asset (privileged container, hostPath, ...).
+CREATE TABLE IF NOT EXISTS asset_facts (
+    scan_id INTEGER NOT NULL,
+    uid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (scan_id, uid, kind, value),
+    FOREIGN KEY (scan_id, uid) REFERENCES assets(scan_id, uid) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_kind ON asset_facts(scan_id, kind);
+
 CREATE TABLE IF NOT EXISTS edges (
     scan_id INTEGER NOT NULL,
     source_uid TEXT NOT NULL,
@@ -42,4 +54,16 @@ CREATE TABLE IF NOT EXISTS findings (
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     PRIMARY KEY (scan_id, fingerprint)
+);
+
+-- Blast radius of each workload: what an attacker inside it reaches, by
+-- attack edges, nodes and cluster-wide rights.
+CREATE TABLE IF NOT EXISTS blast_radius (
+    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    namespace TEXT NOT NULL,
+    workload TEXT NOT NULL,
+    secrets INTEGER NOT NULL,
+    namespaces INTEGER NOT NULL,
+    nodes INTEGER NOT NULL,
+    PRIMARY KEY (scan_id, namespace, workload)
 );

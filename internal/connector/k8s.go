@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -77,4 +78,64 @@ func ListServices(ctx context.Context, cl kubernetes.Interface, ns string) ([]co
 		return nil, fmt.Errorf("list services: %w", err)
 	}
 	return svc.Items, nil
+}
+
+func ListNetworkPolicies(ctx context.Context, cl kubernetes.Interface, ns string) ([]networkingv1.NetworkPolicy, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	np, err := cl.NetworkingV1().NetworkPolicies(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list network policies: %w", err)
+	}
+	return np.Items, nil
+}
+
+func ListRoles(ctx context.Context, cl kubernetes.Interface, ns string) ([]rbacv1.Role, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	roles, err := cl.RbacV1().Roles(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	return roles.Items, nil
+}
+
+func ListRoleBindings(ctx context.Context, cl kubernetes.Interface, ns string) ([]rbacv1.RoleBinding, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	rb, err := cl.RbacV1().RoleBindings(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list role bindings: %w", err)
+	}
+	return rb.Items, nil
+}
+
+func ListClusterRoles(ctx context.Context, cl kubernetes.Interface) ([]rbacv1.ClusterRole, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	cr, err := cl.RbacV1().ClusterRoles().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list cluster roles: %w", err)
+	}
+	return cr.Items, nil
+}
+
+func ListIngresses(ctx context.Context, cl kubernetes.Interface, ns string) ([]networkingv1.Ingress, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	ing, err := cl.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list ingresses: %w", err)
+	}
+	return ing.Items, nil
+}
+
+func ListNodes(ctx context.Context, cl kubernetes.Interface) ([]corev1.Node, error) {
+	ctx, cancel := context.WithTimeout(ctx, APITimeout)
+	defer cancel()
+	nodes, err := cl.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+	return nodes.Items, nil
 }

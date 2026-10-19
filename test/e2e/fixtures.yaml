@@ -2,6 +2,13 @@
 #   1x Critical  Workload Running with Cluster-Admin ServiceAccount  (Pod/admin-pod)
 #   1x High      Secret Mounted in Internet-Exposed Workload         (Deployment/web, e2e-db-creds)
 #   1x Critical  Internet-Exposed Workload with Known CVE             (Deployment/web, nginx:1.16)
+#   1x High      Privileged Container                                 (Pod/e2e-privileged)
+#   1x High      Pod Shares Host Namespaces                           (Pod/e2e-host-pid, hostPID)
+#   1x Critical  hostPath Volume                                      (Pod/e2e-host-path, /etc)
+#   1x Medium    Namespace Without NetworkPolicy                      (namespace shieldops-e2e)
+#   1x Low       Image Without Pinned Version                         (Pod/e2e-latest, busybox)
+#   1x High      Workload Running with Wildcard RBAC Role             (Pod/e2e-wildcard-rbac, Role e2e-wildcard)
+# Nine findings, one per detector.
 # Deployment/web has 2 replicas: findings are per workload, not per pod.
 # Clean up: kubectl delete -f test/e2e/fixtures.yaml
 apiVersion: v1
@@ -85,3 +92,97 @@ spec:
     app: e2e-web
   ports:
     - port: 80
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-privileged
+  namespace: shieldops-e2e
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
+      securityContext:
+        privileged: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-host-pid
+  namespace: shieldops-e2e
+spec:
+  hostPID: true
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-host-path
+  namespace: shieldops-e2e
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
+      volumeMounts:
+        - name: etc
+          mountPath: /host-etc
+          readOnly: true
+  volumes:
+    - name: etc
+      hostPath:
+        path: /etc
+---
+# Untagged image: pulled as :latest.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-latest
+  namespace: shieldops-e2e
+spec:
+  containers:
+    - name: sleep
+      image: busybox
+      command: [sleep, "3600"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: e2e-wildcard
+  namespace: shieldops-e2e
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2e-wildcard
+  namespace: shieldops-e2e
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-wildcard
+  namespace: shieldops-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: e2e-wildcard
+subjects:
+  - kind: ServiceAccount
+    name: e2e-wildcard
+    namespace: shieldops-e2e
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-wildcard-rbac
+  namespace: shieldops-e2e
+spec:
+  serviceAccountName: e2e-wildcard
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10

@@ -1,58 +1,269 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="{{.Lang}}"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<title>ShieldOps Security Report</title><style>
-body{background:#0D1B2A;color:#fff;font-family:'Segoe UI',sans-serif;margin:0;padding:20px}
-h1{color:#00B4D8}h2{color:#00B4D8;margin-top:40px}.header{text-align:center;border-bottom:2px solid #00B4D8;padding-bottom:20px;margin-bottom:30px}
-.summary{background:#1b263b;border-radius:10px;padding:20px;margin-bottom:30px;display:flex;justify-content:space-around}
-.stat{text-align:center}.stat-num{font-size:2em;color:#00B4D8;font-weight:bold}
-.card{background:#1b263b;border-radius:10px;padding:20px;margin-bottom:20px}
-.critical{border-left:5px solid #ff4d4d}.high{border-left:5px solid #ff9933}.resolved{border-left:5px solid #06D6A0;opacity:.8}
-.badge{display:inline-block;padding:5px 12px;border-radius:5px;font-weight:bold;font-size:0.85em;margin-right:6px}
-.badge-critical{background:#ff4d4d}.badge-high{background:#ff9933}.badge-new{background:#7c3aed}.badge-resolved{background:#06D6A0;color:#0D1B2A}
-.path{display:flex;align-items:center;flex-wrap:wrap;margin:15px 0}
-.step{padding:8px 12px;background:#3a4a6c;border-radius:5px;margin:4px}
-.arrow{color:#00B4D8;margin:0 5px;font-size:1.2em}
-.fix{background:#1a3a1a;border-left:5px solid #06D6A0;padding:15px;border-radius:5px;margin-top:15px}
-.footer{text-align:center;margin-top:30px;border-top:2px solid #00B4D8;padding-top:20px;color:#888}
-.ok{color:#22c55e;font-weight:600}.fail{color:#f59e0b;font-weight:600}
-.ctable{width:100%;border-collapse:collapse;margin-top:24px;font-size:13px}.ctable th{background:#1e293b;color:#94a3b8;padding:10px 12px;text-align:left;border-bottom:2px solid #334155}.ctable td{padding:9px 12px;border-bottom:1px solid #1e293b;vertical-align:top}.ctable tr:hover td{background:#0f172a}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>{{t "title"}} · {{.Generated}}</title>
+<style>
+/* The design tokens of the ShieldOps web interface: keep them in sync. */
+:root {
+  color-scheme: dark;
+  --bg: #0e1116; --surface: #151920; --surface-2: #1c212a; --border: #272d38; --border-strong: #363e4c;
+  --text: #e7eaf0; --text-2: #a7afbd; --text-3: #8790a0;
+  --accent: #6ea8fe;
+  --critical: #f07167; --high: #f0a05a; --medium: #d9bd5c; --low: #8e99ab; --ok: #4fc49b;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+  --r-sm: 6px; --r: 8px;
+  --t-xs: 12px; --t-sm: 13px; --t-md: 14px; --t-lg: 16px; --t-xl: 20px; --t-2xl: 28px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #e1e4ea; --border-strong: #cdd2da;
+    --text: #151922; --text-2: #4a5263; --text-3: #5f687a;
+    --accent: #2f6fdb;
+    --critical: #c43d33; --high: #b35f12; --medium: #8a6d00; --low: #5f687a; --ok: #1d8a63;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: var(--t-md)/1.55 var(--font); -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+p { margin: 0; }
+.doc { max-width: 960px; margin: 0 auto; padding: var(--s7) var(--s5); }
+.mono { font-family: var(--mono); font-size: 0.92em; }
+.label { color: var(--text-3); font-size: var(--t-xs); font-weight: 500; margin-bottom: var(--s2); }
+
+.cover { padding-bottom: var(--s6); border-bottom: 1px solid var(--border); }
+.brand { display: inline-flex; align-items: center; gap: var(--s2); font-weight: 600; font-size: var(--t-lg); }
+.brand svg { width: 22px; height: 22px; color: var(--accent); }
+.cover h1 { margin-top: var(--s6); font-size: var(--t-2xl); line-height: 1.25; }
+.cover dl { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s6); margin: var(--s4) 0 0; font-size: var(--t-sm); }
+.cover dt { color: var(--text-3); font-size: var(--t-xs); }
+.cover dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+section { margin-top: var(--s7); }
+section > h2 { font-size: var(--t-xl); margin-bottom: var(--s4); }
+.verdict { padding: var(--s4); border: 1px solid var(--border); border-left: 3px solid var(--ok); border-radius: var(--r); background: var(--surface); font-size: var(--t-lg); font-weight: 500; }
+.verdict.urgent { border-left-color: var(--critical); }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--s3); margin-top: var(--s4); }
+.stat { padding: var(--s4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); break-inside: avoid; }
+.stat .k { color: var(--text-2); font-size: var(--t-xs); font-weight: 500; }
+.stat .v { margin-top: var(--s2); font-size: var(--t-2xl); font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat .v.zero { color: var(--text-3); }
+
+.sev { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+.sev::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--low); flex: none; }
+.sev-Critical::before { background: var(--critical); }
+.sev-High::before { background: var(--high); }
+.sev-Medium::before { background: var(--medium); }
+.sev-Low::before { background: var(--low); }
+
+.group { display: flex; align-items: center; gap: var(--s2); margin: var(--s6) 0 var(--s3); font-size: var(--t-lg); }
+.group .n { color: var(--text-3); font-weight: 500; }
+.finding { padding: var(--s5); margin-bottom: var(--s3); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); break-inside: avoid; }
+.finding-head { display: flex; align-items: baseline; gap: var(--s3); }
+.finding h4 { font-size: var(--t-lg); overflow-wrap: anywhere; }
+.pill { padding: 1px 8px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-2); font-size: var(--t-xs); font-weight: 500; white-space: nowrap; }
+.finding .desc { margin-top: var(--s2); color: var(--text-2); overflow-wrap: anywhere; }
+.finding .block { margin-top: var(--s4); }
+.path { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+.path li { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.path li + li::before { content: "→"; color: var(--text-3); }
+.node { padding: 5px 10px; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--r-sm); font-family: var(--mono); font-size: var(--t-xs); overflow-wrap: anywhere; }
+.path li:first-child .node { border-color: color-mix(in srgb, var(--critical) 45%, var(--border)); }
+.path li:last-child .node { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.score { padding: 1px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border-strong); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pathsvg { display: block; max-width: 100%; height: auto; margin-bottom: var(--s3); }
+.pathsvg .pn rect { fill: var(--surface-2); stroke: var(--border-strong); }
+.pathsvg .pn-first rect { stroke: color-mix(in srgb, var(--critical) 55%, var(--border)); }
+.pathsvg .pn-last rect { stroke: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.pathsvg .pn-i { fill: none; stroke: var(--text-2); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.pathsvg .pn-Internet .pn-i { stroke: var(--critical); }
+.pathsvg .pn-Secret .pn-i, .pathsvg .pn-Node .pn-i, .pathsvg .pn-Role .pn-i { stroke: var(--high); }
+.pathsvg .pn-k { fill: var(--text-3); font: 500 11px var(--font); }
+.pathsvg .pn-n { fill: var(--text); font: 13px var(--mono); }
+.pathsvg .pe line { stroke: var(--border-strong); stroke-width: 1.5; }
+.pathsvg .pe polygon { fill: var(--border-strong); }
+.pathsvg .pe text { fill: var(--text-3); font: 11px var(--font); }
+.empty { padding: var(--s6); border: 1px dashed var(--border-strong); border-radius: var(--r); color: var(--text-2); text-align: center; }
+
+.resolved { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
+.resolved li { display: flex; gap: var(--s3); align-items: baseline; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--border); break-inside: avoid; }
+.resolved li:last-child { border-bottom: 0; }
+.resolved .what { min-width: 0; overflow-wrap: anywhere; }
+.resolved .desc { color: var(--text-2); font-size: var(--t-sm); }
+
+.note { color: var(--text-2); font-size: var(--t-sm); margin: calc(-1 * var(--s2)) 0 var(--s4); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+th { padding: 10px var(--s4); border-bottom: 1px solid var(--border); color: var(--text-3); font-size: var(--t-xs); font-weight: 500; text-align: left; white-space: nowrap; }
+td { padding: var(--s3) var(--s4); border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: break-word; }
+col.c-id { width: 8%; } col.c-desc { width: 34%; } col.c-class { width: 9%; } col.c-status { width: 11%; } col.c-find { width: 18%; } col.c-rec { width: 20%; }
+tbody tr:last-child td { border-bottom: 0; }
+tr { break-inside: avoid; }
+td.id { font-family: var(--mono); font-size: var(--t-xs); white-space: nowrap; }
+td.muted { color: var(--text-3); }
+.state { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+.state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.state.fail::before { background: var(--critical); }
+.state.ok { color: var(--text-2); }
+.state.ok::before { background: var(--ok); }
+
+.draft { margin: 0 0 var(--s3); padding: var(--s3) var(--s4); border: 1px solid var(--high); border-radius: var(--r); color: var(--text); font-weight: 600; }
+footer .mono { margin-top: var(--s1); overflow-wrap: anywhere; }
+footer { margin-top: var(--s7); padding-top: var(--s4); border-top: 1px solid var(--border); color: var(--text-3); font-size: var(--t-xs); }
+
+@media (max-width: 640px) {
+  .doc { padding: var(--s5) var(--s4); }
+  .path { flex-direction: column; align-items: stretch; }
+  .path li { flex-direction: column; align-items: flex-start; }
+  .path li + li::before { content: "↓"; margin-left: var(--s3); }
+}
+
+/* Print: A4, black on white, no fills, findings are never cut. */
+@page {
+  size: A4;
+  margin: 18mm 16mm 20mm;
+  @bottom-left { content: "{{t "title"}} · {{.Generated}}"; font: 8pt var(--font); color: #555; }
+  @bottom-right { content: counter(page) " / " counter(pages); font: 8pt var(--font); color: #555; }
+}
+@media print {
+  :root {
+    color-scheme: light;
+    --bg: #fff; --surface: #fff; --surface-2: #fff; --border: #c9cdd4; --border-strong: #9aa1ad;
+    --text: #000; --text-2: #222; --text-3: #555; --accent: #000;
+    --critical: #b3261e; --high: #a35200; --medium: #7a6000; --low: #555; --ok: #1d7a55;
+  }
+  body { font-size: 10pt; background: #fff; }
+  .doc { max-width: none; padding: 0; }
+  .cover h1 { margin-top: var(--s5); }
+  section { margin-top: var(--s6); }
+  section > h2, .group { break-after: avoid; }
+  .finding, .stat, .verdict, .resolved li, tr { break-inside: avoid; }
+  .table-wrap { overflow: visible; border: 0; border-radius: 0; }
+  thead th { border-bottom-color: var(--border-strong); }
+  th, td { padding: 6px 8px; }
+  /* Severity and status dots are indicators, not fills: keep them. */
+  .sev::before, .state::before { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  thead { display: table-header-group; }
+  a { color: inherit; text-decoration: none; }
+  a[href]::after { content: " (" attr(href) ")"; }
+}
 </style></head><body>
-<div class="header"><h1>ShieldOps Security Report</h1><p>{{.Generated.Format "2006-01-02 15:04:05 MST"}}</p></div>
-<div class="summary">
-<div class="stat"><div class="stat-num">{{.Assets}}</div><div>Assets</div></div>
-<div class="stat"><div class="stat-num">{{.Edges}}</div><div>Edges</div></div>
-<div class="stat"><div class="stat-num">{{len .Findings}}</div><div>Findings</div></div>
+<main class="doc">
+<header class="cover">
+<div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8 4.5 5.6v6.1c0 4.6 3.1 8.2 7.5 9.5 4.4-1.3 7.5-4.9 7.5-9.5V5.6L12 2.8Z"/><path d="m8.8 12 2.2 2.2 4.2-4.4" stroke-linecap="round"/></svg>ShieldOps</div>
+<h1>{{t "title"}}</h1>
+<dl>
+{{- if .ScanID}}<div><dt>{{t "col.scan"}}</dt><dd>№{{.ScanID}}</dd></div>{{end}}
+<div><dt>{{t "col.date"}}</dt><dd>{{.Generated}}</dd></div>
+{{- with .Cluster}}<div><dt>{{t "col.cluster"}}</dt><dd>{{.}}</dd></div>{{end}}
+</dl>
+</header>
+
+<section>
+<h2>{{t "summary"}}</h2>
+<p class="verdict{{if .Urgent}} urgent{{end}}">{{.Verdict}}</p>
+<div class="stats">
+{{- range .Summary}}
+<div class="stat"><div class="k"><span class="sev sev-{{.Severity}}">{{sevLabel .Severity}}</span></div><div class="v{{if not .Count}} zero{{end}}">{{.Count}}</div></div>
+{{- end}}
 {{- if .Baseline}}
-<div class="stat"><div class="stat-num">{{.New}}</div><div>New since last scan</div></div>
-<div class="stat"><div class="stat-num">{{len .Resolved}}</div><div>Resolved</div></div>
+<div class="stat"><div class="k">{{t "new"}}</div><div class="v{{if not .New}} zero{{end}}">{{.New}}</div></div>
+<div class="stat"><div class="k">{{t "resolved"}}</div><div class="v{{if not .Resolved}} zero{{end}}">{{len .Resolved}}</div></div>
 {{- end}}
+{{- if .Platform}}
+<div class="stat"><div class="k">{{t "platform"}}</div><div class="v">{{len .Platform}}</div></div>
+{{- end}}
+<div class="stat"><div class="k">{{t "assets"}}</div><div class="v">{{.Assets}}</div></div>
+<div class="stat"><div class="k">{{t "edges"}}</div><div class="v">{{.Edges}}</div></div>
 </div>
-{{- if not .Findings}}
-<div class="card"><h3 style="color:#06D6A0">No critical findings detected</h3></div>
+</section>
+
+{{- if .Paths}}
+<section>
+<h2>{{t "paths"}}</h2>
+<p class="note">{{t "paths.note"}}</p>
+{{- range .Paths}}
+<article class="finding">
+<div class="finding-head"><span class="score" title="{{t "score"}}">{{.Score}}</span><h4>{{.Title}}</h4><span class="sev sev-{{.Severity}}">{{sevLabel .Severity}}</span>{{if .New}}<span class="pill">{{t "newbadge"}}</span>{{end}}</div>
+{{- if .Description}}<p class="desc">{{.Description}}</p>{{end}}
+<div class="block">{{diagram .}}<ol class="path">{{range .AttackPath}}<li><span class="node">{{.}}</span></li>{{end}}</ol></div>
+{{- if .Remediation}}
+<div class="block"><div class="label">{{t "fix"}}</div><p>{{.Remediation}}</p></div>
 {{- end}}
+</article>
+{{- end}}
+</section>
+{{- end}}
+
+<section>
+<h2>{{t "findings"}}</h2>
+{{- if not .Groups}}
+<p class="empty">{{t "nofindings"}}</p>
+{{- end}}
+{{- range .Groups}}
+<h3 class="group"><span class="sev sev-{{.Severity}}">{{sevLabel .Severity}}</span><span class="n">{{len .Findings}}</span></h3>
 {{- range .Findings}}
-<div class="card {{if eq .Severity "Critical"}}critical{{else}}high{{end}}">
-<span class="badge {{if eq .Severity "Critical"}}badge-critical{{else}}badge-high{{end}}">{{.Severity}}</span>
-{{- if .New}}<span class="badge badge-new">NEW</span>{{end}}
-<h3>{{.Title}}</h3><p>{{.Description}}</p>
-<div class="path">{{range $i, $step := .AttackPath}}{{if $i}}<span class="arrow">→</span>{{end}}<span class="step">{{$step}}</span>{{end}}</div>
-<div class="fix"><strong>Remediation:</strong> {{.Remediation}}</div>
-</div>
+<article class="finding">
+<div class="finding-head"><h4>{{.Title}}</h4>{{if .New}}<span class="pill">{{t "newbadge"}}</span>{{end}}</div>
+{{- if .Description}}<p class="desc">{{.Description}}</p>{{end}}
+{{- if .AttackPath}}
+<div class="block"><div class="label">{{t "path"}}</div><ol class="path">{{range .AttackPath}}<li><span class="node">{{.}}</span></li>{{end}}</ol></div>
 {{- end}}
+{{- if .Remediation}}
+<div class="block"><div class="label">{{t "fix"}}</div><p>{{.Remediation}}</p></div>
+{{- end}}
+</article>
+{{- end}}
+{{- end}}
+</section>
+
+{{- if .Platform}}
+<section>
+<h2>{{t "platform"}} <span class="n">{{len .Platform}}</span></h2>
+<p class="note">{{t "platform.note"}}</p>
+<ul class="resolved">
+{{- range .Platform}}
+<li><span class="sev sev-{{.Severity}}">{{sevLabel .Severity}}</span> {{.Title}}{{if .Description}} — {{.Description}}{{end}}</li>
+{{- end}}
+</ul>
+</section>
+{{- end}}
+
 {{- if .Resolved}}
-<h2>Resolved since last scan</h2>
+<section>
+<h2>{{t "resolved"}}</h2>
+<ul class="resolved">
 {{- range .Resolved}}
-<div class="card resolved"><span class="badge badge-resolved">RESOLVED</span><h3>{{.Title}}</h3><p>{{.Description}}</p></div>
+<li><span class="sev sev-{{.Severity}}">{{sevLabel .Severity}}</span><div class="what">{{.Title}}{{if .Description}}<div class="desc">{{.Description}}</div>{{end}}</div></li>
 {{- end}}
+</ul>
+</section>
 {{- end}}
-<h2>FSTEK Order No.17 Compliance</h2>
-<table class="ctable"><thead><tr><th>ID</th><th>Description</th><th>Class</th><th>Status</th><th>Findings</th><th>Recommendation</th></tr></thead><tbody>
+
+{{- if .Measures}}
+<section>
+<h2>{{t "fstek"}}</h2>
+{{- if .Draft}}<p class="draft">{{t "draft"}}</p>{{end}}
+<p class="note">{{t "fstek.source" .OrderTitle}} {{t "fstek.note" .Violated (len .Controls)}}</p>
+<div class="table-wrap">
+<table><colgroup><col class="c-id"><col class="c-desc"><col class="c-class"><col class="c-status"><col class="c-find"><col class="c-rec"></colgroup><thead><tr><th>{{t "col.id"}}</th><th>{{t "col.desc"}}</th><th>{{t "col.class"}}</th><th>{{t "col.status"}}</th><th>{{t "col.find"}}</th><th>{{t "col.rec"}}</th></tr></thead><tbody>
 {{- range .Controls}}
-<tr><td><strong>{{.ID}}</strong></td><td>{{.Description}}</td><td>{{.Class}}</td>
-{{- if .Titles}}<td><span class="fail">&#9888; FAIL</span></td><td>{{range $i, $t := .Titles}}{{if $i}}<br>{{end}}{{$t}}{{end}}</td><td>{{.Recommendation}}</td>
-{{- else}}<td><span class="ok">&#10003; OK</span></td><td>&#8212;</td><td>&#8212;</td>{{end}}</tr>
+<tr><td class="id">{{.ID}}</td><td>{{.Name}}</td><td class="id">{{.Classes}}</td>
+{{- if .Titles}}<td><span class="state fail">{{t "st.fail"}}</span></td><td>{{range $i, $title := .Titles}}{{if $i}}<br>{{end}}{{$title}}{{end}}</td><td>{{.Recommendation}}</td>
+{{- else}}<td><span class="state ok">{{t "st.ok"}}</span></td><td class="muted">—</td><td class="muted">—</td>{{end}}</tr>
 {{- end}}
 </tbody></table>
-<div class="footer">ShieldOps · shieldops.tech</div>
+</div>
+</section>
+{{- end}}
+
+<footer>{{if .Version}}{{t "footer" .Version}}{{else}}{{t "footer.dev"}}{{end}} · {{.Generated}}{{with .Cluster}} · {{.}}{{end}}
+<div class="mono">{{t "digest"}}: {{.Digest}}</div>
+{{- if .SignKey}}<div class="mono">{{t "signkey"}}: {{.SignKey}}</div><div>{{t "signnote"}}</div>{{end}}</footer>
+</main>
 </body></html>
