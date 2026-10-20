@@ -1,5 +1,7 @@
 # ShieldOps
 
+**English** · [Русский](README.ru.md)
+
 Agentless Kubernetes security scanner. Detects toxic privilege combinations, exposed secrets, and CVEs. Generates an HTML report with findings mapped to FSTEK controls, and tells you what changed since the previous scan.
 
 This repository is the open part: the `scan` CLI, the graph, the detectors and the HTML report. The image and the Helm chart run ShieldOps inside your cluster, with a web interface, for free on one cluster.
