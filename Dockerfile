@@ -22,6 +22,15 @@ FROM ${BIN} AS bin
 
 FROM aquasec/trivy:${TRIVY_VERSION} AS trivy
 
+# CI image (--target ci): the same binaries with the busybox shell that
+# GitLab CI and Actions need to run job scripts.
+FROM gcr.io/distroless/static-debian12:debug-nonroot AS ci
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=bin --chmod=0755 /out/shieldops /usr/local/bin/shieldops
+USER 65532:65532
+ENTRYPOINT []
+CMD ["shieldops", "help"]
+
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 # Explicit mode: a host build under a strict umask would leave the binary

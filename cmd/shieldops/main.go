@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/signal"
@@ -70,9 +71,21 @@ func main() {
 		os.Exit(2)
 	}
 	if err := cmd.run(ctx, os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode reports err and returns the exit code: 1, or 2 for bad input of
+// check; a failed check gate has no message, its findings are the output.
+func exitCode(err error) int {
+	if errors.Is(err, errGate) {
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if errors.As(err, new(inputError)) {
+		return 2
+	}
+	return 1
 }
 
 type scanConfig struct {
@@ -83,6 +96,15 @@ type scanConfig struct {
 	trivyTimeout                           time.Duration
 	keepScans                              int
 	clusterName, signKeyFile               string
+	// log receives the progress of a scan; nil is stdout.
+	log io.Writer
+}
+
+func (c scanConfig) out() io.Writer {
+	if c.log == nil {
+		return os.Stdout
+	}
+	return c.log
 }
 
 func (c *scanConfig) register(fs *flag.FlagSet) {
@@ -271,7 +293,17 @@ type scanResult struct {
 
 // scan runs one full scan and records it. On error it returns what was
 // found so far; such a scan is marked failed and never used as a baseline.
-func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sql.DB) (res scanResult, err error) {
+func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sql.DB) (scanResult, error) {
+	return scanFrom(ctx, cfg, db, func(ctx context.Context) (*inventory.Snapshot, error) {
+		apiCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		return inventory.Collect(apiCtx, kube, cfg.namespace, csvList(cfg.excludeNamespaces))
+	})
+}
+
+// scanFrom is scan of the objects collect returns: the cluster, or
+// manifests in check.
+func scanFrom(ctx context.Context, cfg scanConfig, db *sql.DB, collect func(context.Context) (*inventory.Snapshot, error)) (res scanResult, err error) {
 	data := &res.Data
 	data.Generated, data.Version = time.Now(), version
 	scanID, err := graph.BeginScan(ctx, db)
@@ -286,10 +318,8 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 		err = errors.Join(err, graph.FinishScan(finishCtx, db, scanID, err == nil), graph.PruneScans(finishCtx, db, cfg.keepScans))
 	}()
 
-	apiCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	fmt.Printf("\n[*] Scan #%d: collecting assets...\n", scanID)
-	snap, err := inventory.Collect(apiCtx, kube, cfg.namespace, csvList(cfg.excludeNamespaces))
+	fmt.Fprintf(cfg.out(), "\n[*] Scan #%d: collecting assets...\n", scanID)
+	snap, err := collect(ctx)
 	if err != nil {
 		return res, fmt.Errorf("inventory: %w", err)
 	}
@@ -298,12 +328,12 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 	if err := graph.StoreAssets(ctx, db, scanID, assets); err != nil {
 		return res, fmt.Errorf("store assets: %w", err)
 	}
-	fmt.Printf("[✓] Discovered %d assets\n", len(assets))
+	fmt.Fprintf(cfg.out(), "[✓] Discovered %d assets\n", len(assets))
 
 	edges := append(graph.BuildEdges(snap), graph.AttackEdges(snap)...)
 	var trivyErr error
 	if !cfg.skipTrivy {
-		fmt.Println("[*] Scanning images with Trivy...")
+		fmt.Fprintln(cfg.out(), "[*] Scanning images with Trivy...")
 		trivyCtx, trivyCancel := context.WithTimeout(ctx, cfg.trivyTimeout)
 		var cveEdges []graph.Edge
 		cveEdges, trivyErr = trivy.ScanImages(trivyCtx, trivy.Runner{Command: strings.Fields(cfg.trivyCmd), CacheDir: cfg.trivyCache}, snap.PodsByImage())
@@ -318,7 +348,7 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 	if data.Edges, err = graph.StoreEdges(ctx, db, scanID, edges); err != nil {
 		return res, fmt.Errorf("store edges: %w", err)
 	}
-	fmt.Printf("[✓] Built graph with %d edges\n", data.Edges)
+	fmt.Fprintf(cfg.out(), "[✓] Built graph with %d edges\n", data.Edges)
 	g, err := paths.Load(ctx, db, scanID)
 	if err != nil {
 		return res, fmt.Errorf("load attack graph: %w", err)
@@ -348,11 +378,11 @@ func scan(ctx context.Context, cfg scanConfig, kube kubernetes.Interface, db *sq
 		return res, err
 	}
 	res.Recorded, res.Complete = true, complete
-	printFindings(*data)
+	printFindings(cfg.out(), *data)
 	return res, errors.Join(append(detectErrs, trivyErr)...)
 }
 
-func printFindings(d report.Data) {
+func printFindings(w io.Writer, d report.Data) {
 	var apps, platform []detectors.Finding
 	for _, f := range d.Findings {
 		if f.Platform {
@@ -361,11 +391,11 @@ func printFindings(d report.Data) {
 			apps = append(apps, f)
 		}
 	}
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Fprintln(w, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	if len(apps) == 0 {
-		fmt.Println("[✓] No findings in applications")
+		fmt.Fprintln(w, "[✓] No findings in applications")
 	} else {
-		fmt.Printf("[!] %d findings in applications:\n\n", len(apps))
+		fmt.Fprintf(w, "[!] %d findings in applications:\n\n", len(apps))
 	}
 	for i, f := range apps {
 		mark := ""
@@ -375,20 +405,20 @@ func printFindings(d report.Data) {
 		if f.Score > 0 {
 			mark += fmt.Sprintf(" [risk %d]", f.Score)
 		}
-		fmt.Printf("[%d] %s%s — %s\n    %s\n    Path: %s\n    Fix: %s\n\n",
+		fmt.Fprintf(w, "[%d] %s%s — %s\n    %s\n    Path: %s\n    Fix: %s\n\n",
 			i+1, f.Severity, mark, f.Title, f.Description, strings.Join(f.AttackPath, " → "), f.Remediation)
 	}
 	if len(platform) > 0 {
-		fmt.Printf("Cluster platform (Kubernetes and infrastructure components, usually set up by the cluster's provider): %d findings\n", len(platform))
+		fmt.Fprintf(w, "Cluster platform (Kubernetes and infrastructure components, usually set up by the cluster's provider): %d findings\n", len(platform))
 		for _, f := range platform {
-			fmt.Printf("    %s — %s: %s\n", f.Severity, f.Title, f.Description)
+			fmt.Fprintf(w, "    %s — %s: %s\n", f.Severity, f.Title, f.Description)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 	if d.Baseline {
-		fmt.Printf("Since previous scan: %d new, %d resolved\n", d.New, len(d.Resolved))
+		fmt.Fprintf(w, "Since previous scan: %d new, %d resolved\n", d.New, len(d.Resolved))
 		for _, f := range d.Resolved {
-			fmt.Printf("    resolved: %s — %s\n", f.Title, f.Description)
+			fmt.Fprintf(w, "    resolved: %s — %s\n", f.Title, f.Description)
 		}
 	}
 }

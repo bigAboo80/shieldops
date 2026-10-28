@@ -105,10 +105,60 @@ shieldops keygen -show-pub -key keys/shieldops-signing.key     # print the publi
 
 Until a FSTEK expert confirms the mapping of findings to measures, the measures table is marked as a draft (`detectors.MappingReviewed`).
 
+## Check before a rollout (CI)
+
+`shieldops check` runs the same checks and attack paths on manifests, without a cluster: plain YAML, directories, or the output of `helm template` and `kustomize build`. Free, no license.
+
+```bash
+shieldops check k8s/                                # files and directories
+helm template app ./chart | shieldops check -       # Helm chart
+shieldops check -fail-on critical -lang ru k8s/
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-fail-on` | `high` | lowest severity that fails the check: `critical`, `high`, `medium`, `low`, `none` |
+| `-format` | `text` | `text`, `sarif` (GitHub, Gitea, DefectDojo), `gitlab` (Code Quality), `json` |
+| `-output` | stdout | output file |
+| `-baseline`, `-write-baseline` | none | accepted findings: shown, but do not fail the check |
+| `-images` | `false` | also scan the images for CVEs with Trivy |
+| `-namespace` | `default` | namespace of objects without one |
+
+Exit code: 0 — below the threshold, 1 — findings reach it, 2 — bad input. Findings point to the file and line of the object; for `helm template`, to the template.
+
+GitLab CI, findings shown in the merge request (image with a shell: `<version>-ci`, from 0.4.0):
+
+```yaml
+render:
+  stage: build
+  image: alpine/helm:3.19.0
+  script: helm template app ./chart > rendered.yaml
+  artifacts: {paths: [rendered.yaml]}
+
+shieldops:
+  stage: test
+  image: ghcr.io/bigaboo80/shieldops:0.4.0-ci
+  script: shieldops check -format gitlab -output gl-code-quality-report.json rendered.yaml
+  artifacts:
+    when: always
+    reports: {codequality: gl-code-quality-report.json}
+```
+
+GitHub or Gitea Actions:
+
+```yaml
+- run: docker run --rm -i ghcr.io/bigaboo80/shieldops:0.4.0-ci shieldops check -format sarif - < rendered.yaml > shieldops.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with: {sarif_file: shieldops.sarif}
+```
+
+What the cluster has and the manifests do not is not seen: roles bound outside the input, objects of other teams. Built-in `cluster-admin` and the `default` ServiceAccount are assumed.
+
 ## Architecture
 
 ```
-cmd/shieldops/      CLI: scan
+cmd/shieldops/      CLI: scan, check
 internal/
   connector/        Kubernetes API client (client-go)
   inventory/        Asset collection (pods, SAs, cluster role bindings, services)

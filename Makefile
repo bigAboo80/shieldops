@@ -41,5 +41,7 @@ publish: build
 	DOCKER_BUILDKIT=1 docker build --build-arg BIN=prebuilt -t $(PUBLIC_IMAGE):$(VERSION) -t $(PUBLIC_IMAGE):latest .
 	docker push $(PUBLIC_IMAGE):$(VERSION)
 	docker push $(PUBLIC_IMAGE):latest
+	DOCKER_BUILDKIT=1 docker build --build-arg BIN=prebuilt --target ci -t $(PUBLIC_IMAGE):$(VERSION)-ci .
+	docker push $(PUBLIC_IMAGE):$(VERSION)-ci
 	rm -rf dist && mkdir -p dist && helm package deploy/helm/shieldops -d dist
 	helm push dist/shieldops-$(VERSION).tgz $(PUBLIC_CHARTS)

@@ -111,10 +111,60 @@ shieldops verify -pub keys/shieldops-signing.pub report.html
 
 Подпись Ed25519 отсоединённая: файл `.sig` лежит рядом с отчётом. Аудитору отдаётся только `.pub`. Это не квалифицированная электронная подпись.
 
+## Проверка до выката (CI)
+
+`shieldops check` делает те же проверки и ищет те же пути атаки по манифестам, без кластера: обычные YAML, каталоги, вывод `helm template` и `kustomize build`. Бесплатно, без лицензии.
+
+```bash
+shieldops check k8s/                                # файлы и каталоги
+helm template app ./chart | shieldops check -       # Helm-чарт
+shieldops check -fail-on critical -lang ru k8s/
+```
+
+| Флаг | По умолчанию | Значение |
+|---|---|---|
+| `-fail-on` | `high` | с какой критичности проверка не проходит: `critical`, `high`, `medium`, `low`, `none` |
+| `-format` | `text` | `text`, `sarif` (GitHub, Gitea, DefectDojo), `gitlab` (Code Quality), `json` |
+| `-output` | stdout | файл результата |
+| `-baseline`, `-write-baseline` | нет | принятые находки: показываются, но не останавливают сборку |
+| `-images` | `false` | проверить и образы на CVE через Trivy |
+| `-namespace` | `default` | namespace объектов, где он не указан |
+
+Код выхода: 0 — порог не достигнут, 1 — есть находки не ниже порога, 2 — ошибка входных данных. Находка указывает файл и строку объекта, для `helm template` — шаблон.
+
+GitLab CI, находки видны в Merge Request (образ с оболочкой — `<версия>-ci`, начиная с 0.4.0):
+
+```yaml
+render:
+  stage: build
+  image: alpine/helm:3.19.0
+  script: helm template app ./chart > rendered.yaml
+  artifacts: {paths: [rendered.yaml]}
+
+shieldops:
+  stage: test
+  image: ghcr.io/bigaboo80/shieldops:0.4.0-ci
+  script: shieldops check -format gitlab -output gl-code-quality-report.json rendered.yaml
+  artifacts:
+    when: always
+    reports: {codequality: gl-code-quality-report.json}
+```
+
+GitHub или Gitea Actions:
+
+```yaml
+- run: docker run --rm -i ghcr.io/bigaboo80/shieldops:0.4.0-ci shieldops check -format sarif - < rendered.yaml > shieldops.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with: {sarif_file: shieldops.sarif}
+```
+
+Чего нет в манифестах, проверка не видит: роли, привязанные вне входных файлов, объекты других команд. Встроенная роль `cluster-admin` и ServiceAccount `default` считаются существующими.
+
 ## Архитектура
 
 ```
-cmd/shieldops/   CLI: scan, keygen, verify
+cmd/shieldops/   CLI: scan, check, keygen, verify
 internal/
   connector/     клиент Kubernetes API
   inventory/     сбор объектов
